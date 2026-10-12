@@ -82,8 +82,8 @@ for (int i = 0; i < M; ++i)
 对 1023³ ≈ 10.7 亿次乘加的主循环来说，这点开销可以忽略。
 
 > 页面的交互演示中可以看到两种顺序下每个 cache line 的复用情况：
-> [mpi-loop-interchange.html](docs/mpi-loop-interchange.html) ·
-> [mpi-transpose.html](docs/mpi-transpose.html)
+> [mpi-loop-interchange.html](https://jie-gittttt.github.io/parallel-computing/01-mpi-matrix-multiplication/docs/mpi-loop-interchange.html) ·
+> [mpi-transpose.html](https://jie-gittttt.github.io/parallel-computing/01-mpi-matrix-multiplication/docs/mpi-transpose.html)
 
 ---
 

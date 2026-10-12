@@ -66,7 +66,7 @@ __global__ void fused_conv2d_pool_kernel(const Pixel* __restrict__ input, ...) {
 中间结果全程待在**寄存器**里，只在最后写一次输出（尺寸还只有原图的 1/4）。
 显存流量从 `读1 + 写1 + 读1 + 写0.25` 降到 `读1 + 写0.25`。
 
-> 微观机制演示：[cuda-fusion.html](docs/cuda-fusion.html)
+> 微观机制演示：[cuda-fusion.html](https://jie-gittttt.github.io/parallel-computing/03-cuda-convolution-pooling/docs/cuda-fusion.html)
 
 ### 顺带解决的两件事
 
@@ -136,7 +136,7 @@ Kernel      0.23 ms   ← 优化掉 0.05 ms
 但在真实管道中，**决定性能的是占 99.9% 的那部分**。要想真正提速，得先解决
 BMP 的读写与主机侧转换，而不是继续打磨 kernel。
 
-> 带宽视角的分析：[cuda-bandwidth.html](docs/cuda-bandwidth.html) ——
+> 带宽视角的分析：[cuda-bandwidth.html](https://jie-gittttt.github.io/parallel-computing/03-cuda-convolution-pooling/docs/cuda-bandwidth.html) ——
 > 算术强度（Arithmetic Intensity）如何决定一个 kernel 是计算受限还是带宽受限。
 
 ---

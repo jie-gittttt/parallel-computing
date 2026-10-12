@@ -64,22 +64,22 @@
 
 | 演示 | 说明 |
 | :--- | :--- |
-| [mpi-loop-interchange](01-mpi-matrix-multiplication/docs/mpi-loop-interchange.html) | i-k-j 循环交换为什么比 i-j-k 快：逐格展示访存顺序 |
-| [mpi-transpose](01-mpi-matrix-multiplication/docs/mpi-transpose.html) | 7×8 缩微矩阵，对比原版与 B 转置版的计算流程 |
-| [convolution](02-pthread-openmp-convolution/docs/convolution.html) | 卷积过程：像素窗口如何在图像上滑动 |
-| [convolution-optimized](02-pthread-openmp-convolution/docs/convolution-optimized.html) | 二维卷积拆成水平 + 垂直两趟，逐阶段对照 |
-| [convolution-parallel](02-pthread-openmp-convolution/docs/convolution-parallel.html) | 按行划分给多个线程，展示负载均衡问题 |
-| [cuda-pipeline](03-cuda-convolution-pooling/docs/cuda-pipeline.html) | 异构计算全流程：Host ↔ Device 数据流转 |
-| [cuda-mapping](03-cuda-convolution-pooling/docs/cuda-mapping.html) | `blockIdx` / `threadIdx` 如何映射到全局内存坐标，含 Warp 可视化 |
-| [cuda-fusion](03-cuda-convolution-pooling/docs/cuda-fusion.html) | 算子融合微观机制：寄存器里完成卷积 + 池化，访存 4× → 1× |
-| [cuda-bandwidth](03-cuda-convolution-pooling/docs/cuda-bandwidth.html) | 显存带宽 vs 算术强度：为什么融合能突破带宽墙 |
+| [mpi-loop-interchange](https://jie-gittttt.github.io/parallel-computing/01-mpi-matrix-multiplication/docs/mpi-loop-interchange.html) | i-k-j 循环交换为什么比 i-j-k 快：逐格展示访存顺序 |
+| [mpi-transpose](https://jie-gittttt.github.io/parallel-computing/01-mpi-matrix-multiplication/docs/mpi-transpose.html) | 7×8 缩微矩阵，对比原版与 B 转置版的计算流程 |
+| [convolution](https://jie-gittttt.github.io/parallel-computing/02-pthread-openmp-convolution/docs/convolution.html) | 卷积过程：像素窗口如何在图像上滑动 |
+| [convolution-optimized](https://jie-gittttt.github.io/parallel-computing/02-pthread-openmp-convolution/docs/convolution-optimized.html) | 二维卷积拆成水平 + 垂直两趟，逐阶段对照 |
+| [convolution-parallel](https://jie-gittttt.github.io/parallel-computing/02-pthread-openmp-convolution/docs/convolution-parallel.html) | 按行划分给多个线程，展示负载均衡问题 |
+| [cuda-pipeline](https://jie-gittttt.github.io/parallel-computing/03-cuda-convolution-pooling/docs/cuda-pipeline.html) | 异构计算全流程：Host ↔ Device 数据流转 |
+| [cuda-mapping](https://jie-gittttt.github.io/parallel-computing/03-cuda-convolution-pooling/docs/cuda-mapping.html) | `blockIdx` / `threadIdx` 如何映射到全局内存坐标，含 Warp 可视化 |
+| [cuda-fusion](https://jie-gittttt.github.io/parallel-computing/03-cuda-convolution-pooling/docs/cuda-fusion.html) | 算子融合微观机制：寄存器里完成卷积 + 池化，访存 4× → 1× |
+| [cuda-bandwidth](https://jie-gittttt.github.io/parallel-computing/03-cuda-convolution-pooling/docs/cuda-bandwidth.html) | 显存带宽 vs 算术强度：为什么融合能突破带宽墙 |
 
 另外两份演示录屏（[cuda-mapping.mp4](03-cuda-convolution-pooling/docs/media/cuda-mapping.mp4)、
 [cuda-fusion.mp4](03-cuda-convolution-pooling/docs/media/cuda-fusion.mp4)）是上述页面的屏幕录制，
 放在 `docs/media/` 下作为存档。
 
-> 想在线点开它们，在 **Settings → Pages** 里把 Source 设为当前分支的根目录即可，
-> 之后每个页面就能通过 `https://<用户名>.github.io/parallel-computing/<路径>` 直接访问。
+> 以上演示已通过 GitHub Pages 发布，**<https://jie-gittttt.github.io/parallel-computing/>**
+> 是导航页；表格里的链接直接指向在线版本，点开即可交互。
 
 ---
 

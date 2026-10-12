@@ -42,7 +42,7 @@ Pthread 版本用手写 barrier 实现，OpenMP 版本则利用 `parallel for` �
 可分离版把中间结果保存在 `float` 缓冲里，只在最后一趟才截断——
 多花一张与图像等大的内存，换到更低的 MSE（图像质量更好）。
 
-> 逐阶段对照：[convolution-optimized.html](docs/convolution-optimized.html)
+> 逐阶段对照：[convolution-optimized.html](https://jie-gittttt.github.io/parallel-computing/02-pthread-openmp-convolution/docs/convolution-optimized.html)
 
 ---
 

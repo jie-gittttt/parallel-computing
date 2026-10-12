@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CUDA 算子融合详细演示</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #0f172a; /* 深色背景，体现底层硬件感 */
+            color: #e2e8f0;
+        }
+
+        /* 显存网格样式 */
+        .memory-grid {
+            display: grid;
+            grid-template-columns: repeat(6, 1fr);
+            gap: 2px;
+            padding: 4px;
+            background: #1e293b;
+            border-radius: 4px;
+            border: 1px solid #334155;
+        }
+
+        .pixel {
+            width: 100%;
+            aspect-ratio: 1;
+            background-color: #334155;
+            border-radius: 2px;
+            transition: all 0.3s ease;
+            position: relative;
+        }
+
+        .pixel.active-scan {
+            background-color: #60a5fa; /* 扫描中的蓝色 */
+            box-shadow: 0 0 8px #60a5fa;
+        }
+
+        .pixel.active-center {
+            background-color: #3b82f6; /* 卷积中心点 */
+            border: 2px solid #fff;
+        }
+
+        .pixel.active-write {
+            background-color: #22c55e; /* 写入的绿色 */
+            box-shadow: 0 0 10px #22c55e;
+            transform: scale(1.1);
+        }
+
+        /* 寄存器样式 */
+        .register-box {
+            background: #172554; /* 深蓝色背景 */
+            border: 1px solid #1d4ed8;
+            border-radius: 6px;
+            padding: 8px;
+            text-align: center;
+            transition: all 0.3s;
+            position: relative;
+        }
+
+        .register-box.filled {
+            background: #f59e0b; /* 存入数据的琥珀色 */
+            color: #fff;
+            box-shadow: 0 0 10px rgba(245, 158, 11, 0.6);
+            border-color: #f59e0b;
+        }
+
+        .register-box.winner {
+            background: #22c55e;
+            border-color: #22c55e;
+            transform: scale(1.1);
+            z-index: 20;
+        }
+
+        /* 连线与动画 */
+        .data-particle {
+            position: absolute;
+            width: 12px;
+            height: 12px;
+            background-color: #f59e0b;
+            border-radius: 50%;
+            pointer-events: none;
+            z-index: 50;
+            display: none;
+            box-shadow: 0 0 8px #f59e0b;
+        }
+
+        .highlight-border {
+            border: 2px dashed #f59e0b;
+            animation: dash 1s linear infinite;
+        }
+
+        @keyframes dash {
+            to { stroke-dashoffset: -20; }
+        }
+
+        .chip-label {
+            position: absolute;
+            top: -20px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 0.75rem;
+            color: #94a3b8;
+            white-space: nowrap;
+        }
+    </style>
+</head>
+<body class="h-screen flex flex-col p-4 md:p-8 overflow-hidden">
+
+    <!-- Header -->
+    <div class="text-center mb-6">
+        <h1 class="text-2xl font-bold text-white mb-2">CUDA 算子融合微观机制</h1>
+        <p class="text-slate-400 text-sm">单线程内的 "卷积 + 池化" 流水线 | 寄存器级优化</p>
+    </div>
+
+    <!-- Main Content -->
+    <div class="flex-grow flex flex-col lg:flex-row gap-6 max-w-7xl mx-auto w-full relative">
+        
+        <!-- 左侧：全局内存 (Global Memory) 输入 -->
+        <div class="flex-1 flex flex-col items-center justify-center relative p-4 bg-slate-900/50 rounded-xl border border-slate-800">
+            <span class="chip-label text-blue-400 font-bold">Global Memory (输入图像)</span>
+            <div class="memory-grid w-48 md:w-64" id="input-grid">
+                <!-- JS生成像素网格 -->
+            </div>
+            <div class="mt-4 text-xs text-slate-500 text-center">
+                红色框: 2x2 池化窗口<br>蓝色区: 5x5 卷积感受野
+            </div>
+        </div>
+
+        <!-- 中间：GPU 核心 (SM Core / Thread) -->
+        <div class="flex-1 flex flex-col relative bg-slate-800 rounded-xl border-2 border-slate-600 p-6 shadow-2xl">
+            <span class="absolute -top-3 left-1/2 -translate-x-1/2 bg-slate-800 px-3 text-sm font-bold text-amber-400 border border-slate-600 rounded-full">
+                单个 GPU 线程 (Thread)
+            </span>
+
+            <!-- 运算逻辑区 -->
+            <div class="flex-grow flex flex-col justify-between py-4">
+                
+                <!-- 步骤 1: 卷积计算 -->
+                <div class="text-center mb-4">
+                    <div class="text-xs text-slate-400 mb-2">步骤1: 连续计算4次卷积</div>
+                    <div class="flex justify-center items-center gap-2">
+                        <div class="w-12 h-12 rounded border border-slate-600 flex items-center justify-center bg-slate-900">
+                            <i data-lucide="calculator" class="w-6 h-6 text-slate-500" id="alu-icon"></i>
+                        </div>
+                        <span class="text-xs text-slate-500 animate-pulse hidden" id="calc-status">计算中...</span>
+                    </div>
+                </div>
+
+                <!-- 步骤 2: 寄存器堆 -->
+                <div class="grid grid-cols-2 gap-4 max-w-[200px] mx-auto relative p-2 rounded-lg" id="register-file">
+                    <span class="absolute -top-6 left-1/2 -translate-x-1/2 text-[10px] text-amber-500 uppercase tracking-wider bg-slate-800 px-1">寄存器堆 (Registers)</span>
+                    
+                    <div class="register-box" id="reg-0">
+                        <div class="text-[10px] text-slate-400">R0</div>
+                        <div class="font-mono font-bold text-lg val">-</div>
+                    </div>
+                    <div class="register-box" id="reg-1">
+                        <div class="text-[10px] text-slate-400">R1</div>
+                        <div class="font-mono font-bold text-lg val">-</div>
+                    </div>
+                    <div class="register-box" id="reg-2">
+                        <div class="text-[10px] text-slate-400">R2</div>
+                        <div class="font-mono font-bold text-lg val">-</div>
+                    </div>
+                    <div class="register-box" id="reg-3">
+                        <div class="text-[10px] text-slate-400">R3</div>
+                        <div class="font-mono font-bold text-lg val">-</div>
+                    </div>
+                </div>
+
+                <!-- 步骤 3: 池化比较 -->
+                <div class="mt-4 text-center">
+                    <div class="text-xs text-slate-400 mb-2">步骤2: 寄存器内比对 (Max Pooling)</div>
+                    <div class="w-full h-1 bg-slate-700 rounded overflow-hidden relative">
+                        <div id="compare-bar" class="h-full bg-green-500 w-0 transition-all duration-300"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 数据粒子动画容器 -->
+            <div id="thread-particle-container" class="absolute inset-0 pointer-events-none"></div>
+        </div>
+
+        <!-- 右侧：全局内存 (Global Memory) 输出 -->
+        <div class="flex-1 flex flex-col items-center justify-center relative p-4 bg-slate-900/50 rounded-xl border border-slate-800">
+            <span class="chip-label text-green-400 font-bold">Global Memory (最终输出)</span>
+            <div class="memory-grid w-24 md:w-32 grid-cols-3" id="output-grid" style="grid-template-columns: repeat(3, 1fr);">
+                <!-- JS生成输出像素 -->
+            </div>
+            <div class="mt-8 p-4 bg-slate-800/80 rounded border border-slate-700 text-xs text-slate-300 w-full">
+                <div class="font-bold mb-1 text-amber-400">性能优势分析:</div>
+                <ul class="list-disc pl-4 space-y-1">
+                    <li>显存写入次数: <span class="text-red-400 line-through">4次</span> <i data-lucide="arrow-right" class="inline w-3 h-3"></i> <span class="text-green-400">1次</span></li>
+                    <li>显存读取次数: <span class="text-red-400 line-through">中间结果读取</span> <i data-lucide="arrow-right" class="inline w-3 h-3"></i> <span class="text-green-400">0次</span></li>
+                    <li>数据交换: 全部在 <span class="text-amber-400">片上寄存器</span> 完成</li>
+                </ul>
+            </div>
+        </div>
+        
+        <!-- 全局粒子层 -->
+        <div id="global-particle-layer" class="fixed inset-0 pointer-events-none z-50">
+            <div id="particle" class="data-particle"></div>
+        </div>
+
+    </div>
+
+    <!-- Controls -->
+    <div class="mt-6 flex flex-col items-center justify-center gap-4">
+        <div class="flex gap-4">
+            <button onclick="startFusion()" id="startBtn" class="flex items-center bg-blue-600 hover:bg-blue-500 text-white px-8 py-3 rounded-lg font-bold shadow-lg shadow-blue-900/50 transition active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed">
+                <i data-lucide="play" class="w-5 h-5 mr-2"></i> 运行融合流水线
+            </button>
+            <button onclick="resetDemo()" id="resetBtn" class="flex items-center bg-slate-700 hover:bg-slate-600 text-white px-6 py-3 rounded-lg font-bold transition disabled:opacity-50" disabled>
+                <i data-lucide="rotate-ccw" class="w-4 h-4 mr-2"></i> 重置
+            </button>
+        </div>
+        <div id="status-text" class="h-6 text-amber-400 font-mono text-sm">点击"运行"开始模拟...</div>
+    </div>
+
+    <script>
+        lucide.createIcons();
+
+        // 模拟数据
+        const inputSize = 6;
+        const outputSize = 3; // Input 6x6 -> Output 3x3 (after 2x2 pooling)
+        let isRunning = false;
+
+        // 预定义的2x2区域在6x6网格中的索引 (以 (2,2) 为左上角为例，方便展示5x5感受野)
+        // 实际上为了演示方便，我们选取中心位置
+        // 假设 Input Grid 索引 0-35
+        // 选定处理的2x2块：索引 14, 15, 20, 21 (中间位置)
+        // 对应的卷积感受野会覆盖周围
+        const targetBlock = [14, 15, 20, 21]; 
+        const convValues = [180, 210, 195, 255]; // 模拟计算出的卷积结果
+
+        function initGrids() {
+            const inputGrid = document.getElementById('input-grid');
+            const outputGrid = document.getElementById('output-grid');
+            inputGrid.innerHTML = '';
+            outputGrid.innerHTML = '';
+
+            // 生成输入网格 (6x6)
+            for(let i=0; i<36; i++) {
+                const div = document.createElement('div');
+                div.className = 'pixel';
+                div.id = `in-${i}`;
+                // 标记为暗色
+                div.style.opacity = '0.3';
+                inputGrid.appendChild(div);
+            }
+
+            // 生成输出网格 (3x3)
+            for(let i=0; i<9; i++) {
+                const div = document.createElement('div');
+                div.className = 'pixel';
+                div.id = `out-${i}`;
+                div.style.backgroundColor = '#1e293b'; // 空的颜色
+                div.style.border = '1px dashed #475569';
+                outputGrid.appendChild(div);
+            }
+        }
+
+        async function startFusion() {
+            if(isRunning) return;
+            isRunning = true;
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('resetBtn').disabled = false;
+            
+            // 1. 选中要处理的2x2区域
+            updateStatus("线程锁定输入图像的 2x2 区域...");
+            highlightBlock(true);
+            await wait(800);
+
+            // 2. 循环处理4个像素 (模拟融合Kernel内部逻辑)
+            for(let i=0; i<4; i++) {
+                const pixelIdx = targetBlock[i];
+                const resultVal = convValues[i];
+                const regId = `reg-${i}`;
+
+                // 2.1 高亮当前正在卷积的像素及其感受野
+                updateStatus(`[卷积] 计算像素 ${i+1}/4, 读取 5x5 邻域...`);
+                highlightConvField(pixelIdx);
+                
+                // 2.2 模拟计算延迟
+                const calcEl = document.getElementById('calc-status');
+                const aluIcon = document.getElementById('alu-icon');
+                calcEl.classList.remove('hidden');
+                aluIcon.classList.add('text-blue-400', 'scale-110');
+                
+                await wait(600); // 计算中
+
+                // 2.3 传输结果到寄存器
+                calcEl.classList.add('hidden');
+                aluIcon.classList.remove('text-blue-400', 'scale-110');
+                
+                updateStatus(`[写入] 结果 ${resultVal} 存入寄存器 R${i}`);
+                await animateParticleToRegister(pixelIdx, regId);
+                
+                // 2.4 更新寄存器显示
+                const regBox = document.getElementById(regId);
+                regBox.classList.add('filled');
+                regBox.querySelector('.val').innerText = resultVal;
+
+                await wait(300);
+            }
+
+            // 3. 寄存器内池化
+            updateStatus("[池化] 寄存器内并行比对，寻找最大值...");
+            clearInputHighlights(); // 清除输入高亮，聚焦到核心
+            
+            // 进度条动画
+            document.getElementById('compare-bar').style.width = '100%';
+            await wait(600);
+
+            // 找出最大值
+            const maxVal = Math.max(...convValues);
+            const maxIdx = convValues.indexOf(maxVal);
+
+            // 高亮最大值寄存器
+            document.getElementById(`reg-${maxIdx}`).classList.add('winner');
+            updateStatus(`[完成] 发现最大值 ${maxVal} (来自 R${maxIdx})`);
+            await wait(800);
+
+            // 4. 写入全局内存
+            updateStatus("[输出] 将最终结果写入 Global Memory (一次性)");
+            // 目标输出像素是正中间的那个 (index 4 in 3x3 grid)
+            await animateParticleToOutput(`reg-${maxIdx}`, 'out-4');
+            
+            const outPixel = document.getElementById('out-4');
+            outPixel.classList.add('active-write');
+            outPixel.innerText = maxVal;
+            outPixel.style.color = '#fff';
+            outPixel.style.display = 'flex';
+            outPixel.style.alignItems = 'center';
+            outPixel.style.justifyContent = 'center';
+            outPixel.style.fontSize = '12px';
+            outPixel.style.fontWeight = 'bold';
+
+            updateStatus("算子融合流水线执行完毕");
+            isRunning = false;
+        }
+
+        // 辅助视觉函数
+        function highlightBlock(active) {
+            targetBlock.forEach(idx => {
+                const el = document.getElementById(`in-${idx}`);
+                if(active) {
+                    el.style.opacity = '1';
+                    el.style.border = '1px solid #f59e0b'; // 琥珀色边框表示待处理区域
+                } else {
+                    el.style.border = 'none';
+                }
+            });
+        }
+
+        function highlightConvField(centerIdx) {
+            // 清除旧的卷积场
+            document.querySelectorAll('.active-scan').forEach(el => el.classList.remove('active-scan'));
+            document.querySelectorAll('.active-center').forEach(el => el.classList.remove('active-center'));
+
+            // 简化的5x5逻辑：在6x6网格中，取周围2圈
+            const row = Math.floor(centerIdx / 6);
+            const col = centerIdx % 6;
+
+            for(let r = row-2; r <= row+2; r++) {
+                for(let c = col-2; c <= col+2; c++) {
+                    if(r >= 0 && r < 6 && c >= 0 && c < 6) {
+                        const idx = r * 6 + c;
+                        const el = document.getElementById(`in-${idx}`);
+                        if(idx === centerIdx) {
+                            el.classList.add('active-center');
+                        } else {
+                            el.classList.add('active-scan');
+                            el.style.opacity = '0.8';
+                        }
+                    }
+                }
+            }
+        }
+
+        function clearInputHighlights() {
+            document.querySelectorAll('.pixel').forEach(el => {
+                el.classList.remove('active-scan', 'active-center');
+                el.style.border = 'none';
+                if(!targetBlock.includes(parseInt(el.id.split('-')[1]))) {
+                    el.style.opacity = '0.3';
+                }
+            });
+        }
+
+        function animateParticleToRegister(fromIdNum, toRegId) {
+            return new Promise(resolve => {
+                const fromEl = document.getElementById(`in-${fromIdNum}`);
+                const toEl = document.getElementById(toRegId);
+                runParticle(fromEl, toEl, resolve);
+            });
+        }
+
+        function animateParticleToOutput(fromRegId, toPixelId) {
+            return new Promise(resolve => {
+                const fromEl = document.getElementById(fromRegId);
+                const toEl = document.getElementById(toPixelId);
+                runParticle(fromEl, toEl, resolve);
+            });
+        }
+
+        function runParticle(startEl, endEl, callback) {
+            const particle = document.getElementById('particle');
+            const startRect = startEl.getBoundingClientRect();
+            const endRect = endEl.getBoundingClientRect();
+
+            // 设置起始位置
+            particle.style.display = 'block';
+            particle.style.transition = 'none';
+            particle.style.left = (startRect.left + startRect.width/2 - 6) + 'px';
+            particle.style.top = (startRect.top + startRect.height/2 - 6) + 'px';
+
+            // 强制重绘
+            particle.offsetHeight;
+
+            // 移动
+            particle.style.transition = 'all 0.6s cubic-bezier(0.4, 0, 0.2, 1)';
+            particle.style.left = (endRect.left + endRect.width/2 - 6) + 'px';
+            particle.style.top = (endRect.top + endRect.height/2 - 6) + 'px';
+
+            setTimeout(() => {
+                particle.style.display = 'none';
+                if(callback) callback();
+            }, 600);
+        }
+
+        function updateStatus(text) {
+            document.getElementById('status-text').innerText = text;
+        }
+
+        function wait(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        function resetDemo() {
+            isRunning = false;
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('resetBtn').disabled = true;
+            document.getElementById('compare-bar').style.width = '0';
+            updateStatus("准备就绪");
+            
+            initGrids();
+            
+            // 重置寄存器
+            for(let i=0; i<4; i++) {
+                const reg = document.getElementById(`reg-${i}`);
+                reg.className = 'register-box';
+                reg.querySelector('.val').innerText = '-';
+            }
+        }
+
+        // 初始化
+        initGrids();
+
+    </script>
+</body>
+</html>

@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CUDA 卷积池化与 Warp 可视化</title>
+    
+    <!-- 引入 Tailwind CSS (用于样式) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- 引入 React 和 ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- 引入 Babel (用于在浏览器解析 JSX) -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <style>
+        body { background-color: #0a0a0a; color: #e5e5e5; }
+        .grid-cell { transition: all 0.3s ease; }
+        /* 自定义动画 */
+        @keyframes pulse-glow {
+            0%, 100% { box-shadow: 0 0 5px rgba(59, 130, 246, 0.5); }
+            50% { box-shadow: 0 0 15px rgba(59, 130, 246, 0.9); }
+        }
+        .animate-pulse-glow { animation: pulse-glow 1.5s infinite; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // ==========================================
+        // 0. Icons (内嵌 SVG，替代 lucide-react)
+        // ==========================================
+        const Icons = {
+            Play: ({size=20, className}) => <svg width={size} height={size} className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>,
+            Pause: ({size=20, className}) => <svg width={size} height={size} className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>,
+            RefreshCw: ({size=20, className}) => <svg width={size} height={size} className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 4v6h-6"></path><path d="M1 20v-6h6"></path><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>,
+            Cpu: ({size=20, className}) => <svg width={size} height={size} className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="14" x2="23" y2="14"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="14" x2="4" y2="14"></line></svg>,
+            Database: ({size=20, className}) => <svg width={size} height={size} className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path></svg>,
+            ArrowRight: ({size=20, className}) => <svg width={size} height={size} className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>,
+            Zap: ({size=20, className}) => <svg width={size} height={size} className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>,
+            Layers: ({size=20, className}) => <svg width={size} height={size} className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>,
+            Activity: ({size=20, className}) => <svg width={size} height={size} className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>,
+            FileCode: ({size=20, className}) => <svg width={size} height={size} className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"></path><polyline points="14 2 14 8 20 8"></polyline><path d="M9 13.5L7.5 15l1.5 1.5"></path><path d="M15 13.5l1.5 1.5-1.5 1.5"></path></svg>,
+            LayoutGrid: ({size=20, className}) => <svg width={size} height={size} className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>,
+            MousePointer2: ({size=20, className}) => <svg width={size} height={size} className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"></path><path d="M13 13l6 6"></path></svg>,
+            Calculator: ({size=20, className}) => <svg width={size} height={size} className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="4" y="2" width="16" height="20" rx="2"></rect><line x1="8" y1="6" x2="16" y2="6"></line><line x1="16" y1="14" x2="16" y2="14"></line><line x1="16" y1="18" x2="16" y2="18"></line><line x1="12" y1="14" x2="12" y2="14"></line><line x1="12" y1="18" x2="12" y2="18"></line><line x1="8" y1="14" x2="8" y2="14"></line><line x1="8" y1="18" x2="8" y2="18"></line></svg>
+        };
+
+        const CudaOptimizationViz = () => {
+          // ==========================================
+          // 1. Config & Constants
+          // ==========================================
+          const IMAGE_SIZE = 12; // Input 12x12
+          const OUT_SIZE = 6;    // Output 6x6
+          const BLOCK_SIZE = 4;  // 4x4 threads per block
+          const PADDING = 2;
+          const SIM_WARP_SIZE = 8; // In this viz, 8 threads = 1 Warp (real hardware is usually 32)
+          
+          // Animation Speed Configuration
+          const BATCH_SIZE_CONV = 4; 
+          const BATCH_SIZE_POOL = 2; 
+          const BATCH_SIZE_FUSED = 2; 
+          
+          // ==========================================
+          // 2. State
+          // ==========================================
+          // Mode: 'BASIC' | 'FUSED' | 'MAPPING' (New)
+          const [mode, setMode] = useState('BASIC'); 
+          const [stage, setStage] = useState('IDLE');
+          const [isPlaying, setIsPlaying] = useState(false);
+          const [progress, setProgress] = useState(0);
+          
+          // Data State
+          const [inputGrid, setInputGrid] = useState([]);
+          const [paddedGrid, setPaddedGrid] = useState([]);
+          const [convGrid, setConvGrid] = useState([]); 
+          const [outputGrid, setOutputGrid] = useState([]); 
+          
+          // Visualization State
+          const [activeThread, setActiveThread] = useState(null); // { x, y, type... }
+          const [registers, setRegisters] = useState({ r: 0, g: 0, b: 0 }); 
+          const [logs, setLogs] = useState([]);
+
+          // Mapping Mode Specific State
+          const [mapBlock, setMapBlock] = useState({ x: 0, y: 0 });   // Current BlockIdx
+          const [mapThread, setMapThread] = useState({ x: 0, y: 0 }); // Current ThreadIdx
+
+          // ==========================================
+          // 3. Init & Helper
+          // ==========================================
+          useEffect(() => {
+            resetSim();
+          }, [mode]);
+
+          const addLog = (msg) => setLogs(prev => [...prev.slice(-5), `[${mode}] ${msg}`]);
+
+          const resetSim = () => {
+            setIsPlaying(false);
+            setStage('IDLE');
+            setProgress(0);
+            setActiveThread(null);
+            setRegisters({ r:0, g:0, b:0 });
+            setMapBlock({ x: 0, y: 0 });
+            setMapThread({ x: 0, y: 0 });
+
+            if (mode === 'MAPPING') {
+                setLogs(['> Mapping Mode: Visualizing Coordinate & Warp.', '> Formula: global = blockIdx * blockDim + threadIdx']);
+            } else {
+                setLogs([`> System Ready. Mode: ${mode === 'BASIC' ? 'Basic (Two Kernels)' : 'Fused (One Kernel)'}`]);
+            }
+            
+            // Init Grids
+            const initialInput = Array.from({ length: IMAGE_SIZE }, () => 
+              Array.from({ length: IMAGE_SIZE }, () => Math.floor(Math.random() * 200) + 20)
+            );
+            setInputGrid(initialInput);
+            setPaddedGrid(Array.from({ length: IMAGE_SIZE + PADDING*2 }, () => Array(IMAGE_SIZE + PADDING*2).fill(0)));
+            setConvGrid(Array.from({ length: IMAGE_SIZE }, () => Array(IMAGE_SIZE).fill(0))); 
+            setOutputGrid(Array.from({ length: OUT_SIZE }, () => Array(OUT_SIZE).fill(0)));
+          };
+
+          // ==========================================
+          // 4. Animation Engine
+          // ==========================================
+          useEffect(() => {
+            let timer;
+            if (isPlaying) {
+              // Mapping mode can be slower to be readable, or fast to scan
+              const speed = mode === 'MAPPING' ? 100 : 50; 
+              timer = setInterval(runStep, speed);
+            }
+            return () => clearInterval(timer);
+          }, [isPlaying, stage, progress, mode, mapBlock, mapThread]);
+
+          const runStep = () => {
+            // ==========================================
+            // Mode C: MAPPING (Coordinate Viz)
+            // ==========================================
+            if (mode === 'MAPPING') {
+                // Iterate Threads: (0,0) -> (3,0) -> ... -> (3,3)
+                // Then Next Block
+                let nextTx = mapThread.x + 1;
+                let nextTy = mapThread.y;
+                let nextBx = mapBlock.x;
+                let nextBy = mapBlock.y;
+
+                if (nextTx >= BLOCK_SIZE) {
+                    nextTx = 0;
+                    nextTy += 1;
+                }
+                if (nextTy >= BLOCK_SIZE) {
+                    nextTy = 0;
+                    nextBx += 1;
+                }
+                if (nextBx >= (IMAGE_SIZE / BLOCK_SIZE)) {
+                    nextBx = 0;
+                    nextBy += 1;
+                }
+                if (nextBy >= (IMAGE_SIZE / BLOCK_SIZE)) {
+                    setIsPlaying(false); // End of grid
+                    addLog("Traversal Complete.");
+                    return;
+                }
+
+                setMapThread({ x: nextTx, y: nextTy });
+                setMapBlock({ x: nextBx, y: nextBy });
+                return; // Exit runStep
+            }
+
+            // --- Common Setup for EXECUTION Modes ---
+            if (stage === 'IDLE') {
+              setStage('PADDING');
+              addLog('Host->Device: Copy & Padding...');
+              return;
+            }
+
+            // --- Padding Stage ---
+            if (stage === 'PADDING') {
+              if (progress < 100) {
+                const row = Math.floor((progress / 100) * IMAGE_SIZE);
+                const newPadded = [...paddedGrid];
+                if (row < IMAGE_SIZE) {
+                    for(let c=0; c<IMAGE_SIZE; c++) {
+                        newPadded[row+PADDING][c+PADDING] = inputGrid[row][c];
+                    }
+                    setPaddedGrid(newPadded);
+                    setProgress(p => p + (100/IMAGE_SIZE));
+                }
+              } else {
+                setProgress(0);
+                if (mode === 'BASIC') {
+                    setStage('KERNEL_1_CONV');
+                    addLog('Launch Kernel 1: convolution_kernel<<<grid, block>>>');
+                } else {
+                    setStage('KERNEL_FUSED');
+                    addLog('Launch Kernel Fused: fused_conv2d_pool_kernel<<<grid, block>>>');
+                }
+              }
+              return;
+            }
+
+            // ==========================================
+            // Mode A: BASIC
+            // ==========================================
+            if (mode === 'BASIC') {
+                if (stage === 'KERNEL_1_CONV') {
+                    const totalPixels = IMAGE_SIZE * IMAGE_SIZE;
+                    let currentIdx = Math.floor(progress);
+                    
+                    if (currentIdx < totalPixels) {
+                        const newConv = [...convGrid];
+                        let lastThread = null;
+                        for (let i = 0; i < BATCH_SIZE_CONV && (currentIdx + i) < totalPixels; i++) {
+                            const idx = currentIdx + i;
+                            const y = Math.floor(idx / IMAGE_SIZE);
+                            const x = idx % IMAGE_SIZE;
+                            lastThread = { x, y, type: 'CONV' };
+                            const val = inputGrid[y][x]; 
+                            newConv[y][x] = Math.min(255, Math.floor(val * 0.9 + 10));
+                        }
+                        setConvGrid(newConv);
+                        if(lastThread) setActiveThread(lastThread);
+                        setProgress(p => p + BATCH_SIZE_CONV); 
+                    } else {
+                        setProgress(0);
+                        setStage('BARRIER');
+                        setActiveThread(null);
+                        addLog('Global Memory Barrier (Sync)...');
+                    }
+                } 
+                else if (stage === 'BARRIER') {
+                    setTimeout(() => {
+                        if(stage === 'BARRIER') { 
+                            setStage('KERNEL_2_POOL');
+                            addLog('Launch Kernel 2: max_pool_kernel<<<grid, block>>>');
+                        }
+                    }, 500);
+                    if(progress === 0) setProgress(1); 
+                }
+                else if (stage === 'KERNEL_2_POOL') {
+                    const totalOut = OUT_SIZE * OUT_SIZE;
+                    let currentIdx = Math.floor(progress);
+                    if (currentIdx < totalOut) {
+                        const newOut = [...outputGrid];
+                        let lastThread = null;
+                        for (let i = 0; i < BATCH_SIZE_POOL && (currentIdx + i) < totalOut; i++) {
+                            const idx = currentIdx + i;
+                            const y = Math.floor(idx / OUT_SIZE);
+                            const x = idx % OUT_SIZE;
+                            lastThread = { x, y, type: 'POOL' };
+                            const srcY = y*2; const srcX = x*2;
+                            const v1 = convGrid[srcY][srcX] || 0;
+                            const v2 = convGrid[srcY][srcX+1] || 0;
+                            const v3 = convGrid[srcY+1][srcX] || 0;
+                            const v4 = convGrid[srcY+1][srcX+1] || 0;
+                            newOut[y][x] = Math.max(v1, v2, v3, v4);
+                        }
+                        setOutputGrid(newOut);
+                        if(lastThread) setActiveThread(lastThread);
+                        setProgress(p => p + BATCH_SIZE_POOL);
+                    } else {
+                        finishSim();
+                    }
+                }
+            }
+
+            // ==========================================
+            // Mode B: FUSED
+            // ==========================================
+            if (mode === 'FUSED') {
+                if (stage === 'KERNEL_FUSED') {
+                    const totalOut = OUT_SIZE * OUT_SIZE;
+                    let currentIdx = Math.floor(progress);
+
+                    if (currentIdx < totalOut) {
+                        const newOut = [...outputGrid];
+                        let lastThread = null;
+                        let lastRegVal = 0;
+
+                        for (let i = 0; i < BATCH_SIZE_FUSED && (currentIdx + i) < totalOut; i++) {
+                            const idx = currentIdx + i;
+                            const y = Math.floor(idx / OUT_SIZE);
+                            const x = idx % OUT_SIZE;
+                            lastThread = { x, y, type: 'FUSED' };
+                            const srcY = y*2; const srcX = x*2;
+                            const v1 = inputGrid[srcY][srcX];
+                            const v2 = inputGrid[srcY][srcX+1];
+                            const v3 = inputGrid[srcY+1][srcX];
+                            const v4 = inputGrid[srcY+1][srcX+1];
+                            const maxVal = Math.max(v1, v2, v3, v4) * 0.9 + 10; 
+                            lastRegVal = Math.floor(maxVal);
+                            newOut[y][x] = lastRegVal;
+                        }
+                        setOutputGrid(newOut);
+                        if(lastThread) {
+                            setActiveThread(lastThread);
+                            setRegisters({ val: lastRegVal });
+                        }
+                        setProgress(p => p + BATCH_SIZE_FUSED);
+                    } else {
+                        finishSim();
+                    }
+                }
+            }
+          };
+
+          const finishSim = () => {
+            setStage('FINISHED');
+            setIsPlaying(false);
+            setActiveThread(null);
+            addLog(`Device->Host: Copy result. ${mode === 'FUSED' ? 'Saved intermediate Memory I/O!' : ''}`);
+          };
+
+          // ==========================================
+          // 5. Visual Components
+          // ==========================================
+          const MemBlock = ({ label, isSlow }) => (
+            <div className={`px-2 py-1 rounded text-[10px] font-mono mb-1 ${isSlow ? 'bg-red-900/50 text-red-200 border border-red-800' : 'bg-green-900/50 text-green-200 border border-green-800'}`}>
+              {label}
+            </div>
+          );
+
+          // Generic Grid Display (Reused for Mapping and Execution)
+          const GridDisplay = ({ data, title, type, isActive, activeBlock, isGhost, mappingHighlight }) => {
+            if (!data || data.length === 0) return null;
+            const gridCols = data.length;
+            
+            const isHighlighted = (r, c) => {
+                // --- Mapping Mode Logic ---
+                if (mode === 'MAPPING' && mappingHighlight) {
+                    const { bx, by, tx, ty } = mappingHighlight;
+                    
+                    if (type === 'LOGICAL_GRID') {
+                        // Highlight active block in 3x3 grid
+                        return r === by && c === bx;
+                    }
+                    if (type === 'LOGICAL_BLOCK') {
+                        // Highlight active thread in 4x4 block
+                        return r === ty && c === tx;
+                    }
+                    if (type === 'GLOBAL_IMAGE') {
+                        // Highlight calculate global coordinate
+                        const globalX = bx * BLOCK_SIZE + tx;
+                        const globalY = by * BLOCK_SIZE + ty;
+                        return r === globalY && c === globalX;
+                    }
+                    return false;
+                }
+
+                // --- Execution Mode Logic ---
+                if (!activeBlock) return false;
+                if (mode === 'BASIC' && stage === 'KERNEL_1_CONV' && type === 'CONV_OUT') return activeBlock.y === r && activeBlock.x === c;
+                if (mode === 'BASIC' && stage === 'KERNEL_2_POOL') {
+                    if (type === 'CONV_OUT') return (r === activeBlock.y*2 || r === activeBlock.y*2+1) && (c === activeBlock.x*2 || c === activeBlock.x*2+1);
+                    if (type === 'FINAL_OUT') return activeBlock.y === r && activeBlock.x === c;
+                }
+                if (mode === 'FUSED' && stage === 'KERNEL_FUSED') {
+                    if (type === 'INPUT') return (r === activeBlock.y*2 || r === activeBlock.y*2+1) && (c === activeBlock.x*2 || c === activeBlock.x*2+1);
+                    if (type === 'FINAL_OUT') return activeBlock.y === r && activeBlock.x === c;
+                }
+                return false;
+            };
+            
+            // Warp Logic Helper (Only for LOGICAL_BLOCK in Mapping Mode)
+            const getWarpStyle = (r, c) => {
+                if (type !== 'LOGICAL_BLOCK' || mode !== 'MAPPING') return {};
+                const flatIdx = r * 4 + c;
+                const warpIdx = Math.floor(flatIdx / SIM_WARP_SIZE);
+                
+                // Color code warps
+                if (warpIdx === 0) return { border: '1px solid #3b82f6' }; // Blue for Warp 0
+                if (warpIdx === 1) return { border: '1px solid #a855f7' }; // Purple for Warp 1
+                return {};
+            };
+
+            return (
+              <div className={`flex flex-col items-center transition-all duration-500 ${isGhost ? 'opacity-20 grayscale scale-90' : 'opacity-100'}`}>
+                <div className="mb-2 font-bold text-gray-300 text-sm flex flex-col items-center">
+                     {title}
+                     <span className="text-[10px] font-mono text-gray-500">{data.length}x{data.length}</span>
+                </div>
+                <div 
+                  className="grid gap-[1px] bg-gray-800 p-1 border border-gray-700 shadow-xl"
+                  style={{ gridTemplateColumns: `repeat(${gridCols}, minmax(0, 1fr))` }}
+                >
+                  {data.map((row, r) => row.map((val, c) => (
+                    <div 
+                      key={`${r}-${c}`}
+                      className={`w-3 h-3 md:w-4 md:h-4 flex items-center justify-center text-[6px] transition-colors duration-100
+                        ${isHighlighted(r,c) ? 'bg-yellow-400 border border-white z-10 scale-125 shadow-[0_0_10px_rgba(250,204,21,0.8)]' : 'bg-gray-900'}
+                      `}
+                      style={{ 
+                          backgroundColor: isHighlighted(r,c) ? undefined : (type.includes('LOGICAL') ? '#333' : `rgb(${val},${val},${val})`),
+                          ...getWarpStyle(r,c)
+                      }}
+                    >
+                        {/* For Logical Grids, show coordinates optionally */}
+                        {type === 'LOGICAL_GRID' && isHighlighted(r,c) && <div className="text-black font-bold">B</div>}
+                        {type === 'LOGICAL_BLOCK' && isHighlighted(r,c) && <div className="text-black font-bold">T</div>}
+                    </div>
+                  )))}
+                </div>
+                {type === 'LOGICAL_BLOCK' && mode === 'MAPPING' && (
+                    <div className="flex gap-2 mt-2 text-[8px] font-mono">
+                         <div className="flex items-center gap-1"><div className="w-2 h-2 border border-blue-500"></div>Warp 0</div>
+                         <div className="flex items-center gap-1"><div className="w-2 h-2 border border-purple-500"></div>Warp 1</div>
+                    </div>
+                )}
+                <div className="mt-2">
+                    {type.includes('INPUT') && <MemBlock label="Global Mem (Read)" isSlow />}
+                    {type.includes('GLOBAL') && <MemBlock label="Global Memory" isSlow />}
+                    {type.includes('OUT') && !type.includes('LOGICAL') && <MemBlock label="Global Mem (RW)" isSlow />}
+                </div>
+              </div>
+            );
+          };
+
+          return (
+            <div className="min-h-screen bg-[#0a0a0a] text-gray-200 font-sans p-4 flex flex-col">
+              
+              {/* HEADER */}
+              <header className="flex flex-col md:flex-row justify-between items-center mb-6 bg-gray-900/50 p-4 rounded-xl border border-gray-800 backdrop-blur-sm">
+                <div className="flex items-center gap-4 mb-4 md:mb-0">
+                  <div className="p-3 bg-blue-900/30 rounded-lg text-blue-400">
+                    {mode === 'MAPPING' ? <Icons.LayoutGrid size={32} /> : <Icons.Cpu size={32} />}
+                  </div>
+                  <div>
+                    <h1 className="text-xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
+                      {mode === 'MAPPING' ? 'CUDA Grid Mapping Viz' : 'CUDA Optimization: Fused Kernels'}
+                    </h1>
+                    <p className="text-xs text-gray-400 font-mono">
+                        {mode === 'MAPPING' ? 'Understanding blockIdx & threadIdx' : 'Comparing cuda_conv_pool.cu vs cuda_fused.cu'}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-4 flex-wrap justify-end">
+                   {/* Mode Switch */}
+                   <div className="flex bg-black rounded-lg p-1 border border-gray-700">
+                      <button 
+                        onClick={() => setMode('BASIC')}
+                        disabled={isPlaying}
+                        className={`px-3 py-2 rounded text-xs md:text-sm font-bold transition-all ${mode === 'BASIC' ? 'bg-gray-700 text-white shadow' : 'text-gray-500 hover:text-gray-300'}`}
+                      >
+                        Basic
+                      </button>
+                      <button 
+                        onClick={() => setMode('FUSED')}
+                        disabled={isPlaying}
+                        className={`px-3 py-2 rounded text-xs md:text-sm font-bold transition-all flex items-center gap-2 ${mode === 'FUSED' ? 'bg-green-700 text-white shadow' : 'text-gray-500 hover:text-gray-300'}`}
+                      >
+                        <Icons.Zap size={14} /> Fused
+                      </button>
+                      <button 
+                        onClick={() => setMode('MAPPING')}
+                        disabled={isPlaying}
+                        className={`px-3 py-2 rounded text-xs md:text-sm font-bold transition-all flex items-center gap-2 ${mode === 'MAPPING' ? 'bg-indigo-600 text-white shadow' : 'text-gray-500 hover:text-gray-300'}`}
+                      >
+                        <Icons.LayoutGrid size={14} /> Mapping
+                      </button>
+                   </div>
+
+                   <div className="h-8 w-[1px] bg-gray-700"></div>
+
+                   <div className="flex gap-2">
+                     <button onClick={() => setIsPlaying(!isPlaying)} className={`p-2 rounded-full ${isPlaying ? 'bg-yellow-600' : 'bg-blue-600'} hover:opacity-80 transition-all`}>
+                        {isPlaying ? <Icons.Pause size={20} /> : <Icons.Play size={20} />}
+                     </button>
+                     <button onClick={resetSim} className="p-2 rounded-full bg-gray-700 hover:bg-gray-600 transition-all">
+                        <Icons.RefreshCw size={20} />
+                     </button>
+                   </div>
+                </div>
+              </header>
+
+              {/* BODY */}
+              <div className="flex flex-1 gap-6 flex-col lg:flex-row overflow-hidden">
+                
+                {/* LEFT: Info & Logs */}
+                <aside className="lg:w-1/4 flex flex-col gap-4">
+                   <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 flex-1">
+                      <h3 className="text-sm font-bold text-gray-400 mb-3 flex items-center gap-2">
+                        <Icons.FileCode size={16}/> {mode === 'MAPPING' ? 'Address Calculation' : 'Kernel Logic'}
+                      </h3>
+                      <div className="font-mono text-[10px] leading-4 text-green-400 bg-black p-3 rounded h-full overflow-hidden relative">
+                         {mode === 'BASIC' && (
+                           <>
+                             <span className="text-gray-500">// Basic Kernel</span><br/>
+                             {`input[y][x] -> d_conv[y][x]`}<br/>
+                             {`...barrier...`}<br/>
+                             {`d_conv[2y][2x] -> output[y][x]`}<br/>
+                           </>
+                         )}
+                         {mode === 'FUSED' && (
+                           <>
+                             <span className="text-gray-500">// Fused Kernel</span><br/>
+                             {`float max_val = 0;`}<br/>
+                             {`#pragma unroll`}<br/>
+                             {`for(dy=0..1; dx=0..1) {`}<br/>
+                             {`  sum = conv(input...);`}<br/>
+                             {`  max_val = max(sum, max_val);`}<br/>
+                             {`}`}<br/>
+                             {`output[idx] = max_val;`}<br/>
+                           </>
+                         )}
+                         {mode === 'MAPPING' && (
+                            <>
+                                <span className="text-gray-500">// Relationship: Grid > Block > Warp</span><br/>
+                                <div className="my-2 border-b border-gray-800 pb-2">
+                                    <div className="text-blue-300 mb-1">Grid (Global)</div>
+                                    <div className="pl-2 border-l border-gray-600">
+                                        <div className="text-purple-300 mb-1">Block (Shared Mem)</div>
+                                        <div className="pl-2 border-l border-gray-600">
+                                            <div className="text-yellow-300 mb-1">Warp (SIMT Exec)</div>
+                                            <div className="text-green-300 pl-2">Thread (Pixel)</div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className="mt-2 text-white">
+                                    Current:<br/>
+                                    bx: <span className="text-yellow-400">{mapBlock.x}</span>, tx: <span className="text-green-400">{mapThread.x}</span><br/>
+                                    Warp ID: <span className="text-indigo-400">{Math.floor((mapThread.y * 4 + mapThread.x)/SIM_WARP_SIZE)}</span>
+                                </div>
+                            </>
+                         )}
+                      </div>
+                   </div>
+                   
+                   <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 h-48 flex flex-col">
+                       <h3 className="text-sm font-bold text-gray-400 mb-2 flex items-center gap-2">
+                         <Icons.Activity size={16}/> Log
+                       </h3>
+                       <div className="flex-1 overflow-y-auto font-mono text-xs space-y-1">
+                           {logs.map((l,i) => <div key={i} className="opacity-80 border-b border-gray-800/50 pb-1">{l}</div>)}
+                       </div>
+                   </div>
+                </aside>
+
+                {/* RIGHT: Visualization */}
+                <main className="lg:w-3/4 bg-gray-950 border border-gray-900 rounded-2xl p-6 relative flex flex-col justify-center items-center">
+                   <div className="absolute top-1/2 left-0 w-full h-1 bg-gray-800 -z-0"></div>
+
+                   {/* --- MAPPING MODE LAYOUT --- */}
+                   {mode === 'MAPPING' && (
+                       <div className="flex justify-around items-center w-full h-full z-10 gap-4">
+                           {/* 1. Grid of Blocks */}
+                           <div className="flex flex-col items-center gap-2 bg-gray-900/80 p-4 rounded-xl border border-yellow-500/30">
+                               <div className="text-yellow-400 font-bold text-xs uppercase tracking-wider mb-2">1. Grid (BlockIdx)</div>
+                               <GridDisplay 
+                                   data={Array(3).fill(Array(3).fill(0))} 
+                                   title="Grid Dim (3x3)" 
+                                   type="LOGICAL_GRID"
+                                   mappingHighlight={{bx: mapBlock.x, by: mapBlock.y, tx: mapThread.x, ty: mapThread.y}}
+                               />
+                               <div className="text-xs font-mono text-yellow-400 mt-1">blockIdx: ({mapBlock.x}, {mapBlock.y})</div>
+                           </div>
+
+                           <Icons.ArrowRight className="text-gray-600" />
+
+                           {/* 2. Block of Threads */}
+                           <div className="flex flex-col items-center gap-2 bg-gray-900/80 p-4 rounded-xl border border-green-500/30">
+                               <div className="text-green-400 font-bold text-xs uppercase tracking-wider mb-2">2. Block (ThreadIdx)</div>
+                               <GridDisplay 
+                                   data={Array(4).fill(Array(4).fill(0))} 
+                                   title="Block Dim (4x4)" 
+                                   type="LOGICAL_BLOCK"
+                                   mappingHighlight={{bx: mapBlock.x, by: mapBlock.y, tx: mapThread.x, ty: mapThread.y}}
+                               />
+                               <div className="text-xs font-mono text-green-400 mt-1">threadIdx: ({mapThread.x}, {mapThread.y})</div>
+                           </div>
+
+                           <Icons.ArrowRight className="text-gray-600" />
+
+                           {/* 3. Global Memory */}
+                           <div className="flex flex-col items-center gap-2 bg-gray-900/80 p-4 rounded-xl border border-indigo-500/30">
+                               <div className="text-indigo-400 font-bold text-xs uppercase tracking-wider mb-2">3. Global Mapping</div>
+                               <GridDisplay 
+                                   data={inputGrid} // Reuse input grid for visualization size
+                                   title="Image (12x12)" 
+                                   type="GLOBAL_IMAGE"
+                                   mappingHighlight={{bx: mapBlock.x, by: mapBlock.y, tx: mapThread.x, ty: mapThread.y}}
+                               />
+                               <div className="text-xs font-mono text-indigo-400 mt-1">Global: ({mapBlock.x * 4 + mapThread.x}, {mapBlock.y * 4 + mapThread.y})</div>
+                           </div>
+                       </div>
+                   )}
+
+                   {/* --- EXECUTION MODE LAYOUT --- */}
+                   {mode !== 'MAPPING' && (
+                     <div className="flex items-center justify-around w-full z-10">
+                        {/* 1. INPUT */}
+                        <GridDisplay 
+                          data={mode === 'FUSED' || stage === 'PADDING' ? paddedGrid : inputGrid} 
+                          title={mode === 'FUSED' ? "Padded Input" : "Input Image"} 
+                          type="INPUT" 
+                          isActive={true}
+                          activeBlock={activeThread}
+                        />
+
+                        {/* FLOW 1 */}
+                        <div className="flex flex-col items-center gap-2">
+                           <Icons.ArrowRight className={`text-gray-600 ${isPlaying ? 'animate-pulse text-blue-500' : ''}`} size={32} />
+                           {mode === 'FUSED' && (
+                              <div className="bg-green-900 text-green-300 text-[10px] px-2 py-1 rounded border border-green-700 animate-bounce">
+                                  Fused Kernel
+                              </div>
+                           )}
+                        </div>
+
+                        {/* 2. INTERMEDIATE */}
+                        <div className={`relative transition-all duration-500 ${mode === 'FUSED' ? 'w-0 opacity-0 overflow-hidden' : 'w-auto opacity-100'}`}>
+                           <GridDisplay 
+                              data={convGrid} 
+                              title="Interm. (Conv)" 
+                              type="CONV_OUT" 
+                              isActive={true}
+                              activeBlock={activeThread}
+                           />
+                           {stage === 'BARRIER' && (
+                              <div className="absolute inset-0 bg-red-500/20 backdrop-blur-sm flex items-center justify-center border-x-2 border-red-500">
+                                  <span className="bg-red-600 text-white text-xs px-2 py-1 font-bold">SYNC BARRIER</span>
+                              </div>
+                           )}
+                        </div>
+
+                        {/* FLOW 2 */}
+                        {mode === 'BASIC' && (
+                           <Icons.ArrowRight className={`text-gray-600 ${stage === 'KERNEL_2_POOL' ? 'text-blue-500 animate-pulse' : ''}`} size={32} />
+                        )}
+
+                        {/* 3. OUTPUT */}
+                        <GridDisplay 
+                          data={outputGrid} 
+                          title="Final Output" 
+                          type="FINAL_OUT" 
+                          isActive={true}
+                          activeBlock={activeThread}
+                        />
+                     </div>
+                   )}
+
+                   {/* REGISTER VIEW (Fused Mode Only) */}
+                   {mode === 'FUSED' && activeThread && (
+                     <div className="absolute bottom-4 bg-gray-800 p-3 rounded-lg border border-green-500/50 shadow-lg flex items-center gap-4 animate-in slide-in-from-bottom-5">
+                        <div className="text-xs text-green-400 font-bold uppercase tracking-wider">Inside Thread Registers</div>
+                        <div className="flex gap-2">
+                            <div className="bg-black px-2 py-1 rounded border border-gray-600 font-mono text-sm text-yellow-400">
+                                max_val: {registers.val || 0}
+                            </div>
+                        </div>
+                        <div className="text-[10px] text-gray-500 max-w-[150px]">
+                            Accumulating 5x5 conv results locally, keeping only max. No Global Mem write until done.
+                        </div>
+                     </div>
+                   )}
+                </main>
+
+              </div>
+            </div>
+          );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<CudaOptimizationViz />);
+    </script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+比较维度,Pthread 基础版 (底层库),OpenMP 基础版 (编译器指令),关键区别分析,,比較維度,OpenMP 基礎版 (Naive 2D),OpenMP 優化版 (Separable 1D),優化優勢分析
+编程范式,显式线程管理 (Explicit),隐式/指令导向 (Directive-based),Pthread 需要程序员手动写代码管理线程生命周期；OpenMP 只需告诉编译器“这里并行执行”。,,算法複雜度,$O(K^2)$ (每像素 25 次運算),$O(2K)$ (每像素 10 次運算),計算量直接減少 60%，是性能提升的根本原因。
+代码量与复杂度,高 (Verbose),低 (Concise),Pthread 需要定义结构体传参、编写 void* 线程函数；OpenMP 仅需一行 #pragma omp。,,代碼結構,單個並行循環塊 (Single Parallel Region),雙階段流水線 (Two-Pass Pipeline),優化版利用 OpenMP 的 parallel for 將任務拆分為「水平」和「垂直」兩個獨立階段。
+任务划分方式,手动计算 (Domain Decomposition),自动划分 (Automatic Scheduling),Pthread 中需要手动计算 start_row 和 end_row；OpenMP 自动将循环迭代分配给线程。,,同步機制,無需顯式同步,隱式同步 (Implicit Barrier),利用 OpenMP 第一個並行循環結束時的自動等待特性，確保垂直卷積讀取數據的安全性，代碼比 Pthread 更簡潔。
+负载均衡,静态 (通常按行均分),动态 (使用 schedule(dynamic)),OpenMP 很容易通过 dynamic 关键字处理任务负载不均的情况，而 Pthread 实现动态负载均衡需要复杂的任务队列。,,內存開銷,低 (原地讀寫),中 (需額外 PixelFloat 緩衝),優化版以空間換時間，申請了與原圖等大的 tempBuffer 來暫存中間結果。
+同步机制,"手动调用 (pthread_join, barrier)",隐式同步 (Implicit Barrier),OpenMP 在 parallel for 结束处会自动等待所有线程完成，无需手动写 Join。,,計算精度,中間結果截斷為 8-bit 整數,中間結果保持 32-bit Float,優化版避免了兩次整數截斷帶來的累積誤差，因此 MSE 通常更低（圖像質量更好）。
+线程私有数据,手动定义 (在结构体或栈中),自动推断,"OpenMP 会自动将循环变量 y, x 设为私有(private)，将 img 设为共享(shared)，极大降低了出错率。",,訪存局部性,一般 (二維鄰域跳躍訪問),極佳 (一維連續訪問),第一階段是純水平掃描，完美契合內存佈局，大幅提升了 CPU Cache Hit Rate。
+可移植性,仅限类 Unix 系统 (POSIX标准),跨平台 (支持 Windows/Linux/macOS),OpenMP 是编译器标准，移植性更好。,,性能 (4核預估),約 0.33 秒,約 0.12 秒,性能提升約 2.7 倍。
+性能表现,极高 (由于手动控制粒度),极高 (编译器优化成熟),在基础矩阵计算任务中，两者的性能通常持平。,,,,,

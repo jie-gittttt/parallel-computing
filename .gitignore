@@ -1,0 +1,33 @@
+# ---------- 编译产物 ----------
+*.o
+*.obj
+*.out
+*.so
+*.dll
+*.exe
+a.out
+Matrix
+pthread_conv
+omp_conv
+cuda_conv_pool
+
+# ---------- 程序运行时生成 ----------
+result.txt
+output.bmp
+Cuda_*.bmp
+Cuda_*.png
+
+# ---------- 编辑器 / 系统 ----------
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+.venv/
+venv/

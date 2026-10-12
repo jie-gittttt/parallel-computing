@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>卷积过程可视化 (Pthread/OpenMP 实验演示)</title>
+    
+    <!-- 1. 引入 Tailwind CSS 用于样式 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- 2. 引入 React 和 React DOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- 3. 引入 Babel 用于在浏览器中编译 JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <style>
+        /* 防止页面加载时的闪烁 */
+        body { opacity: 0; transition: opacity 0.5s; }
+    </style>
+</head>
+<body class="bg-slate-50">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        document.body.style.opacity = 1;
+
+        const { useState, useEffect, useRef, useCallback } = React;
+
+        // --- 图标组件 ---
+        const IconBase = ({ children, size = 24, className = "" }) => (
+            <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>{children}</svg>
+        );
+        const Play = (props) => (<IconBase {...props}><polygon points="5 3 19 12 5 21 5 3"></polygon></IconBase>);
+        const Pause = (props) => (<IconBase {...props}><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></IconBase>);
+        const SkipForward = (props) => (<IconBase {...props}><polygon points="5 4 15 12 5 20 5 4"></polygon><line x1="19" y1="5" x2="19" y2="19"></line></IconBase>);
+        const RotateCcw = (props) => (<IconBase {...props}><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path><path d="M3 3v5h5"></path></IconBase>);
+        const Settings = (props) => (<IconBase {...props}><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.47a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path><circle cx="12" cy="12" r="3"></circle></IconBase>);
+        const ArrowRight = (props) => (<IconBase {...props}><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></IconBase>);
+        const Layers = (props) => (<IconBase {...props}><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></IconBase>);
+        const GridIcon = (props) => (<IconBase {...props}><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></IconBase>);
+        const Cpu = (props) => (<IconBase {...props}><rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="14" x2="23" y2="14"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="14" x2="4" y2="14"></line></IconBase>);
+        const Zap = (props) => (<IconBase {...props}><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></IconBase>);
+
+        // --- 常量定义 ---
+        const GAUSSIAN_KERNEL_5x5 = [
+            [0.003, 0.013, 0.022, 0.013, 0.003],
+            [0.013, 0.059, 0.097, 0.059, 0.013],
+            [0.022, 0.097, 0.159, 0.097, 0.022],
+            [0.013, 0.059, 0.097, 0.059, 0.013],
+            [0.003, 0.013, 0.022, 0.013, 0.003]
+        ];
+        
+        // 1D Kernel from cpp file
+        const KERNEL_1D = [0.120078, 0.233880, 0.292082, 0.233880, 0.120078];
+
+        const KERNEL_RADIUS = 2; 
+        const GRID_SIZE = 10; 
+        const CELL_SIZE = 34; 
+        const GAP_SIZE = 3;
+        const TOTAL_CELL_SIZE = CELL_SIZE + GAP_SIZE;
+
+        const generateRandomMatrix = (size) => {
+            const matrix = [];
+            for (let y = 0; y < size; y++) {
+                const row = [];
+                for (let x = 0; x < size; x++) {
+                    const val = Math.random() > 0.85 ? 255 : Math.floor(Math.random() * 80); 
+                    row.push(val);
+                }
+                matrix.push(row);
+            }
+            return matrix;
+        };
+
+        const App = () => {
+            // --- 状态管理 ---
+            const [inputMatrix, setInputMatrix] = useState(generateRandomMatrix(GRID_SIZE));
+            const [tempMatrix, setTempMatrix] = useState(Array(GRID_SIZE).fill().map(() => Array(GRID_SIZE).fill(null)));
+            const [outputMatrix, setOutputMatrix] = useState(Array(GRID_SIZE).fill().map(() => Array(GRID_SIZE).fill(null)));
+            
+            const [isAnimating, setIsAnimating] = useState(false);
+            const [speed, setSpeed] = useState(200); 
+            const timerRef = useRef(null);
+
+            // mode: 'serial', 'parallel', 'quad', 'separable'
+            const [mode, setMode] = useState('serial');
+            
+            // Phase for separable: 1 (Horizontal), 2 (Vertical)
+            const [phase, setPhase] = useState(1);
+
+            const [cursors, setCursors] = useState([
+                { id: 0, x: 0, y: 0, startY: 0, endY: GRID_SIZE, finished: false, colorClass: 'border-blue-500', bgClass: 'bg-blue-400/20', ringClass: 'ring-blue-500', label: 'Main' }
+            ]);
+
+            const initializeCursors = useCallback((selectedMode) => {
+                setPhase(1); // Reset phase
+                if (selectedMode === 'serial' || selectedMode === 'separable') {
+                    setCursors([{ id: 0, x: 0, y: 0, startY: 0, endY: GRID_SIZE, finished: false, colorClass: 'border-blue-500', bgClass: 'bg-blue-400/20', ringClass: 'ring-blue-500', label: 'Main' }]);
+                } else if (selectedMode === 'parallel') {
+                    const half = Math.floor(GRID_SIZE / 2);
+                    setCursors([
+                        { id: 1, x: 0, y: 0, startY: 0, endY: half, finished: false, colorClass: 'border-cyan-500', bgClass: 'bg-cyan-400/20', ringClass: 'ring-cyan-500', label: 'T1' },
+                        { id: 2, x: 0, y: half, startY: half, endY: GRID_SIZE, finished: false, colorClass: 'border-purple-500', bgClass: 'bg-purple-400/20', ringClass: 'ring-purple-500', label: 'T2' }
+                    ]);
+                } else {
+                    const q = Math.floor(GRID_SIZE / 4);
+                    setCursors([
+                        { id: 1, x: 0, y: 0, startY: 0, endY: q, finished: false, colorClass: 'border-cyan-500', bgClass: 'bg-cyan-400/20', ringClass: 'ring-cyan-500', label: 'T1' },
+                        { id: 2, x: 0, y: q, startY: q, endY: q*2, finished: false, colorClass: 'border-purple-500', bgClass: 'bg-purple-400/20', ringClass: 'ring-purple-500', label: 'T2' },
+                        { id: 3, x: 0, y: q*2, startY: q*2, endY: q*3, finished: false, colorClass: 'border-orange-500', bgClass: 'bg-orange-400/20', ringClass: 'ring-orange-500', label: 'T3' },
+                        { id: 4, x: 0, y: q*3, startY: q*3, endY: GRID_SIZE, finished: false, colorClass: 'border-green-500', bgClass: 'bg-green-400/20', ringClass: 'ring-green-500', label: 'T4' }
+                    ]);
+                }
+                setOutputMatrix(Array(GRID_SIZE).fill().map(() => Array(GRID_SIZE).fill(null)));
+                setTempMatrix(Array(GRID_SIZE).fill().map(() => Array(GRID_SIZE).fill(null)));
+                setIsAnimating(false);
+            }, []);
+
+            const switchMode = (newMode) => {
+                if (newMode === mode) return;
+                setMode(newMode);
+                initializeCursors(newMode);
+                setInputMatrix(generateRandomMatrix(GRID_SIZE));
+            };
+
+            // 1D 卷积计算
+            const calculatePixelSeparable = (cx, cy, sourceMat, isHorizontal) => {
+                let sum = 0;
+                let details = [];
+                
+                for (let k = -KERNEL_RADIUS; k <= KERNEL_RADIUS; k++) {
+                    let nx = cx;
+                    let ny = cy;
+                    
+                    if (isHorizontal) {
+                        nx = cx + k; // 水平移动
+                    } else {
+                        ny = cy + k; // 垂直移动
+                    }
+
+                    const weight = KERNEL_1D[k + KERNEL_RADIUS];
+                    let pixelVal = 0;
+
+                    // 边界处理
+                    if (nx >= 0 && nx < GRID_SIZE && ny >= 0 && ny < GRID_SIZE) {
+                        pixelVal = sourceMat[ny][nx];
+                    } else {
+                        pixelVal = 0; 
+                    }
+                    sum += pixelVal * weight;
+                }
+                // 对于中间结果(Phase 1)，通常保持浮点精度或放大，这里为演示简单取整
+                // 但为了不丢失太多信息，我们不截断到0-255，允许中间值略大
+                return { result: Math.round(sum), rawSum: sum }; 
+            };
+
+            // 2D 卷积计算
+            const calculatePixel2D = (cx, cy, matrix) => {
+                let sumR = 0;
+                for (let ky = -KERNEL_RADIUS; ky <= KERNEL_RADIUS; ky++) {
+                    for (let kx = -KERNEL_RADIUS; kx <= KERNEL_RADIUS; kx++) {
+                        const nx = cx + kx;
+                        const ny = cy + ky;
+                        const weight = GAUSSIAN_KERNEL_5x5[ky + KERNEL_RADIUS][kx + KERNEL_RADIUS];
+                        let pixelVal = 0;
+                        if (nx >= 0 && nx < GRID_SIZE && ny >= 0 && ny < GRID_SIZE) {
+                            pixelVal = matrix[ny][nx];
+                        } else {
+                            pixelVal = 0; 
+                        }
+                        sumR += pixelVal * weight;
+                    }
+                }
+                return { result: Math.min(Math.max(Math.round(sumR), 0), 255), rawSum: sumR };
+            };
+
+            const step = useCallback(() => {
+                if (mode === 'separable') {
+                    // 可分离模式步进逻辑
+                    setCursors(prevCursors => {
+                        const cursor = prevCursors[0];
+                        if (cursor.finished) return prevCursors;
+
+                        let nextX = cursor.x + 1;
+                        let nextY = cursor.y;
+                        let isFinished = false;
+
+                        if (nextX >= GRID_SIZE) {
+                            nextX = 0;
+                            nextY = cursor.y + 1;
+                            if (nextY >= GRID_SIZE) {
+                                isFinished = true;
+                            }
+                        }
+
+                        const nextCursor = { ...cursor, x: nextX, y: nextY };
+
+                        // 计算并更新矩阵
+                        if (phase === 1) {
+                            // Phase 1: Input -> Temp (Horizontal)
+                            setTempMatrix(prev => {
+                                const next = prev.map(r => [...r]);
+                                const { result } = calculatePixelSeparable(cursor.x, cursor.y, inputMatrix, true);
+                                next[cursor.y][cursor.x] = result;
+                                return next;
+                            });
+                        } else {
+                            // Phase 2: Temp -> Output (Vertical)
+                            setOutputMatrix(prev => {
+                                const next = prev.map(r => [...r]);
+                                const { result } = calculatePixelSeparable(cursor.x, cursor.y, tempMatrix, false);
+                                // 最终阶段需要截断
+                                next[cursor.y][cursor.x] = Math.min(Math.max(result, 0), 255);
+                                return next;
+                            });
+                        }
+
+                        if (isFinished) {
+                            if (phase === 1) {
+                                // 阶段 1 结束，自动开始阶段 2
+                                setPhase(2);
+                                // 重置游标回 (0,0)
+                                return [{ ...cursor, x: 0, y: 0, startY: 0, endY: GRID_SIZE, finished: false }];
+                            } else {
+                                // 阶段 2 结束，全部完成
+                                setIsAnimating(false);
+                                return [{ ...cursor, finished: true }];
+                            }
+                        }
+
+                        return [nextCursor];
+                    });
+
+                } else {
+                    // 常规 2D 卷积模式步进
+                    setCursors(prevCursors => {
+                        const allFinished = prevCursors.every(c => c.finished);
+                        if (allFinished) {
+                            setIsAnimating(false);
+                            return prevCursors;
+                        }
+
+                        const nextCursors = prevCursors.map(cursor => {
+                            if (cursor.finished) return cursor;
+                            let nextX = cursor.x + 1;
+                            let nextY = cursor.y;
+                            let isFinished = cursor.finished;
+                            if (nextX >= GRID_SIZE) {
+                                nextX = 0;
+                                nextY = cursor.y + 1;
+                                if (nextY >= cursor.endY) isFinished = true;
+                            }
+                            return { ...cursor, x: nextX, y: nextY, finished: isFinished };
+                        });
+
+                        setOutputMatrix(prevOutput => {
+                            const nextOutput = prevOutput.map(row => [...row]);
+                            prevCursors.forEach(cursor => {
+                                if (!cursor.finished) {
+                                    const { result } = calculatePixel2D(cursor.x, cursor.y, inputMatrix);
+                                    nextOutput[cursor.y][cursor.x] = result;
+                                }
+                            });
+                            return nextOutput;
+                        });
+
+                        if (nextCursors.every(c => c.finished)) setIsAnimating(false);
+                        return nextCursors;
+                    });
+                }
+            }, [inputMatrix, tempMatrix, mode, phase]);
+
+            useEffect(() => {
+                if (isAnimating) {
+                    timerRef.current = setInterval(step, speed);
+                } else {
+                    clearInterval(timerRef.current);
+                }
+                return () => clearInterval(timerRef.current);
+            }, [isAnimating, step, speed]);
+
+            const handleReset = () => initializeCursors(mode);
+
+            const getCellColor = (val) => {
+                if (val === null) return 'rgba(240, 240, 240, 1)';
+                // 防止中间结果溢出显示异常
+                const safeVal = Math.min(Math.max(val, 0), 255);
+                return `rgb(${safeVal}, ${safeVal}, ${safeVal})`;
+            };
+            
+            // Helper logic for rendering
+            const activeCursor = cursors.find(c => !c.finished) || cursors[0];
+            let currentCalcDetails = { rawSum: 0, result: 0 };
+            
+            if (mode === 'separable') {
+                if (phase === 1) {
+                    currentCalcDetails = calculatePixelSeparable(activeCursor.x, activeCursor.y, inputMatrix, true);
+                } else {
+                    // Check if temp matrix has data for current pos? (It should if phase 1 done)
+                    // But cursor logic might be ahead of render? Use safe check.
+                    const safeTemp = tempMatrix[activeCursor.y] && tempMatrix[activeCursor.y][activeCursor.x] !== null ? tempMatrix : tempMatrix; 
+                    currentCalcDetails = calculatePixelSeparable(activeCursor.x, activeCursor.y, safeTemp, false);
+                }
+            } else {
+                currentCalcDetails = calculatePixel2D(activeCursor.x, activeCursor.y, inputMatrix);
+            }
+
+            return (
+                <div className="flex flex-col min-h-screen bg-slate-50 font-sans text-slate-800">
+                
+                {/* 顶部栏 */}
+                <header className="bg-slate-900 text-white p-4 shadow-md z-30 sticky top-0">
+                    <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4">
+                        <div>
+                            <h1 className="text-xl font-bold flex items-center gap-2">
+                                <Settings className="w-6 h-6 text-blue-400" />
+                                卷积算法可视化
+                            </h1>
+                        </div>
+                        
+                        <div className="flex flex-wrap items-center gap-3 justify-center">
+                            <div className="flex items-center bg-slate-800 p-1 rounded-lg border border-slate-700">
+                                <button onClick={() => switchMode('serial')} className={`px-3 py-1.5 text-xs md:text-sm rounded-md transition-all flex items-center gap-1 ${mode === 'serial' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}><Cpu size={14} /> 串行</button>
+                                <button onClick={() => switchMode('parallel')} className={`px-3 py-1.5 text-xs md:text-sm rounded-md transition-all flex items-center gap-1 ${mode === 'parallel' ? 'bg-purple-600 text-white' : 'text-slate-400 hover:text-white'}`}><Layers size={14} /> 2线程</button>
+                                <button onClick={() => switchMode('quad')} className={`px-3 py-1.5 text-xs md:text-sm rounded-md transition-all flex items-center gap-1 ${mode === 'quad' ? 'bg-green-600 text-white' : 'text-slate-400 hover:text-white'}`}><GridIcon size={14} /> 4线程</button>
+                                <button onClick={() => switchMode('separable')} className={`px-3 py-1.5 text-xs md:text-sm rounded-md transition-all flex items-center gap-1 ${mode === 'separable' ? 'bg-orange-500 text-white font-bold' : 'text-slate-400 hover:text-white'}`}><Zap size={14} /> 可分离(优化)</button>
+                            </div>
+
+                            <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700">
+                                <button onClick={() => setIsAnimating(!isAnimating)} className={`px-4 py-1.5 rounded-md transition-colors flex items-center gap-2 font-medium text-sm ${isAnimating ? 'bg-red-500 hover:bg-red-600' : 'bg-green-500 hover:bg-green-600'}`}>{isAnimating ? <><Pause size={16} /> 暂停</> : <><Play size={16} /> 运行</>}</button>
+                                <button onClick={step} disabled={isAnimating || cursors.every(c=>c.finished)} className="p-1.5 hover:bg-slate-700 rounded-md text-gray-300 disabled:opacity-50 ml-1"><SkipForward size={16} /></button>
+                                <button onClick={handleReset} className="p-1.5 hover:bg-slate-700 rounded-md text-gray-300 ml-1"><RotateCcw size={16} /></button>
+                            </div>
+                            
+                            <div className="flex items-center gap-2 bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700 hidden md:flex">
+                                <span className="text-xs text-gray-400">速度</span>
+                                <input type="range" min="10" max="800" step="50" value={810 - speed} onChange={(e) => setSpeed(810 - Number(e.target.value))} className="w-20 h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer" />
+                            </div>
+                        </div>
+                    </div>
+                </header>
+
+                <main className="flex-1 max-w-7xl mx-auto w-full p-4 flex flex-col gap-6">
+                    
+                    {/* 分离模式：显示3个图（源 -> 中间 -> 结果） */}
+                    {mode === 'separable' && (
+                         <div className="flex flex-col lg:flex-row justify-center items-center gap-4 lg:gap-6 overflow-x-auto pb-4">
+                            {/* 1. 源图像 */}
+                            <MatrixView title="源图像 (Input)" badge="Phase 1 Input" matrix={inputMatrix} 
+                                cursor={phase === 1 ? activeCursor : null} 
+                                kernelType="horizontal" 
+                                highlightColor="border-blue-500"
+                            />
+                            
+                            <div className="flex flex-col items-center justify-center text-slate-400">
+                                <ArrowRight size={24} />
+                                <span className="text-[10px] mt-1">1x5 Conv</span>
+                            </div>
+
+                            {/* 2. 中间缓冲 */}
+                            <MatrixView title="中间缓冲 (Temp Buffer)" badge={phase === 1 ? "Writing..." : "Phase 2 Input"} matrix={tempMatrix} 
+                                cursor={phase === 2 ? activeCursor : (phase === 1 && !activeCursor.finished ? { ...activeCursor, isWriter: true } : null)}
+                                kernelType={phase === 2 ? "vertical" : null}
+                                highlightColor="border-orange-500"
+                                isFloat={true}
+                            />
+
+                            <div className="flex flex-col items-center justify-center text-slate-400">
+                                <ArrowRight size={24} />
+                                <span className="text-[10px] mt-1">5x1 Conv</span>
+                            </div>
+
+                            {/* 3. 最终结果 */}
+                            <MatrixView title="最终结果 (Output)" badge="Final" matrix={outputMatrix} 
+                                cursor={phase === 2 ? { ...activeCursor, isWriter: true } : null}
+                                kernelType={null}
+                                highlightColor="border-green-500"
+                            />
+                         </div>
+                    )}
+
+                    {/* 普通模式：显示2个图 */}
+                    {mode !== 'separable' && (
+                        <div className="flex flex-col lg:flex-row justify-center items-start gap-8 lg:gap-16">
+                            <MatrixView title="源图像 (Input)" badge="原始数据" matrix={inputMatrix} 
+                                cursor={activeCursor} 
+                                kernelType="2d"
+                                cursors={cursors} // 传入所有游标用于多线程绘制
+                            />
+                            <div className="hidden lg:flex flex-col items-center justify-center pt-32 opacity-50">
+                                <ArrowRight size={48} className="text-slate-400" />
+                                <span className="text-xs font-bold text-slate-500 mt-2">CONVOLUTION</span>
+                            </div>
+                            <MatrixView title="结果图像 (Output)" badge="处理结果" matrix={outputMatrix} 
+                                cursor={{...activeCursor, isWriter: true}}
+                                cursors={cursors}
+                            />
+                        </div>
+                    )}
+
+                    {/* 底部信息面板 */}
+                    <div className="mt-4 grid md:grid-cols-2 gap-6 bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+                        <div>
+                            <h3 className="text-sm font-bold text-slate-700 mb-3 border-b pb-2">当前卷积核 (Kernel)</h3>
+                            <div className="flex gap-4 items-center">
+                                {mode === 'separable' ? (
+                                    <div className="flex flex-col gap-2">
+                                        <div className={`p-2 rounded border ${phase === 1 ? 'bg-blue-50 border-blue-200' : 'bg-slate-50 border-slate-100 opacity-50'}`}>
+                                            <div className="text-[10px] text-slate-500 mb-1">Phase 1: Horizontal (1x5)</div>
+                                            <div className="flex gap-1">
+                                                {KERNEL_1D.map((w, i) => (
+                                                    <div key={i} className="w-8 h-8 flex items-center justify-center text-[9px] bg-white border rounded shadow-sm font-mono">{w.toFixed(2)}</div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                        <div className={`p-2 rounded border ${phase === 2 ? 'bg-orange-50 border-orange-200' : 'bg-slate-50 border-slate-100 opacity-50'}`}>
+                                            <div className="text-[10px] text-slate-500 mb-1">Phase 2: Vertical (5x1)</div>
+                                            <div className="flex flex-col gap-1 w-8">
+                                                {KERNEL_1D.map((w, i) => (
+                                                    <div key={i} className="w-8 h-8 flex items-center justify-center text-[9px] bg-white border rounded shadow-sm font-mono">{w.toFixed(2)}</div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="grid grid-cols-5 gap-1 bg-slate-50 p-2 rounded border border-slate-200">
+                                        {GAUSSIAN_KERNEL_5x5.map((row, ky) => (
+                                            row.map((w, kx) => (
+                                                <div key={`${kx}-${ky}`} className="w-6 h-6 flex items-center justify-center text-[8px] text-slate-600 bg-white rounded shadow-sm">{w.toFixed(2).substring(1)}</div>
+                                            ))
+                                        ))}
+                                    </div>
+                                )}
+                                
+                                <div className="flex-1 text-xs text-slate-600 flex flex-col justify-center gap-2 pl-4 border-l">
+                                    {mode === 'separable' ? (
+                                        <>
+                                            <p className="font-bold text-orange-600">算法优化 (O(2K)):</p>
+                                            <p>1. <span className="font-semibold">分解</span>：5x5 核拆分为 1x5 和 5x1。</p>
+                                            <p>2. <span className="font-semibold">两步走</span>：先算水平，再算垂直。</p>
+                                            <p>3. <span className="font-semibold">优势</span>：计算量减少 60% (10次乘法 vs 25次)。</p>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <p className="font-bold text-slate-800">标准 2D 卷积 (O(K²)):</p>
+                                            <p>每个像素需要进行 25 次乘加运算。</p>
+                                            <p>计算量大，适合并行加速。</p>
+                                        </>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div>
+                            <h3 className="text-sm font-bold text-slate-700 mb-3 border-b pb-2 flex justify-between">
+                                <span>实时计算监控 {mode === 'separable' ? `(Phase ${phase})` : ''}</span>
+                                <span className="text-xs font-normal text-slate-400">坐标: ({activeCursor.x}, {activeCursor.y})</span>
+                            </h3>
+                            <div className="flex items-center justify-between bg-slate-900 text-green-400 p-4 rounded-lg font-mono">
+                                <div className="flex flex-col gap-1">
+                                    <span className="text-slate-400 text-xs">RAW SUM</span>
+                                    <span className="text-xl">{currentCalcDetails.rawSum.toFixed(2)}</span>
+                                </div>
+                                <ArrowRight className="text-slate-600" />
+                                <div className="flex flex-col gap-1 text-right">
+                                    <span className="text-slate-400 text-xs">{phase === 1 && mode === 'separable' ? 'TEMP VAL' : 'RESULT'}</span>
+                                    <span className="text-3xl font-bold text-white">{currentCalcDetails.result}</span>
+                                </div>
+                            </div>
+                            <div className="mt-3 text-xs text-slate-500">
+                                {mode === 'separable' && phase === 1 && "注意：中间结果(Temp)通常保留浮点精度，不截断，数值可能略大。"}
+                            </div>
+                        </div>
+                    </div>
+                </main>
+                </div>
+            );
+        };
+        
+        // --- 子组件：矩阵视图 ---
+        const MatrixView = ({ title, badge, matrix, cursor, cursors, kernelType, highlightColor, isFloat }) => {
+            const getCellColor = (val) => {
+                if (val === null) return 'rgba(240, 240, 240, 1)';
+                const safeVal = Math.min(Math.max(val, 0), 255);
+                return `rgb(${safeVal}, ${safeVal}, ${safeVal})`;
+            };
+
+            const getBorderClass = (y) => {
+               if (!cursors) return "border-slate-100";
+               const owner = cursors.find(c => y >= c.startY && y < c.endY);
+               if (!owner) return "border-slate-100";
+               if (owner.colorClass.includes('cyan')) return 'border-cyan-100 bg-cyan-50/30';
+               if (owner.colorClass.includes('purple')) return 'border-purple-100 bg-purple-50/30';
+               if (owner.colorClass.includes('orange')) return 'border-orange-100 bg-orange-50/30';
+               if (owner.colorClass.includes('green')) return 'border-green-100 bg-green-50/30';
+               return "border-slate-100";
+            };
+
+            return (
+                <div className="flex flex-col items-center">
+                    <h2 className="text-sm font-bold mb-3 text-slate-700 flex items-center gap-2">
+                        <span className="bg-slate-200 text-slate-700 text-[10px] px-2 py-0.5 rounded">{badge}</span>
+                        {title}
+                    </h2>
+                    
+                    <div className="relative p-4 bg-white rounded-xl shadow-lg border border-slate-200">
+                        <div className="grid gap-[2px]" style={{ gridTemplateColumns: `repeat(${GRID_SIZE}, ${CELL_SIZE}px)` }}>
+                            {matrix.map((row, y) => (
+                                row.map((val, x) => {
+                                    // 多线程模式下的区域染色
+                                    let borderClass = cursors ? getBorderClass(y) : "border-slate-100";
+                                    
+                                    // 写入高亮
+                                    let isWriter = false;
+                                    if (cursor && cursor.isWriter && cursor.x === x && cursor.y === y) isWriter = true;
+                                    if (cursors) {
+                                        const writer = cursors.find(c => c.x === x && c.y === y && !c.finished);
+                                        if (writer) isWriter = true;
+                                    }
+
+                                    return (
+                                        <div key={`${x}-${y}`} 
+                                            className={`flex items-center justify-center text-[9px] select-none rounded-sm border ${borderClass} ${isWriter ? 'ring-2 ring-green-500 z-10 font-bold scale-110' : ''}`}
+                                            style={{ 
+                                                width: CELL_SIZE, height: CELL_SIZE, 
+                                                backgroundColor: getCellColor(val),
+                                                color: val > 128 ? '#000' : '#fff'
+                                            }}
+                                        >
+                                            {val !== null ? Math.round(val) : '.'}
+                                        </div>
+                                    );
+                                })
+                            ))}
+                        </div>
+                        
+                        {/* 卷积核覆盖层 */}
+                        {cursor && !cursor.isWriter && kernelType && (
+                            <div className="absolute top-4 left-4 pointer-events-none transition-transform duration-100 ease-linear z-20"
+                                style={{ transform: `translate(${(cursor.x - (kernelType === 'horizontal' ? 2 : (kernelType === 'vertical' ? 0 : 2))) * (TOTAL_CELL_SIZE - 1)}px, ${(cursor.y - (kernelType === 'horizontal' ? 0 : (kernelType === 'vertical' ? 2 : 2))) * (TOTAL_CELL_SIZE - 1)}px)` }}
+                            >
+                                <div className={`grid gap-[2px] ${kernelType === 'horizontal' ? 'grid-cols-5' : (kernelType === 'vertical' ? 'grid-cols-1' : 'grid-cols-5')}`}>
+                                    {Array.from({ length: kernelType === '2d' ? 25 : 5 }).map((_, idx) => {
+                                        // 简单处理：仅显示框，不显示数字，避免复杂
+                                        return <div key={idx} className={`border-2 ${highlightColor || 'border-blue-500'} bg-blue-400/20`} style={{ width: CELL_SIZE, height: CELL_SIZE }}></div>
+                                    })}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>

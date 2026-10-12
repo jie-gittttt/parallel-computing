@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>卷积过程可视化 (Pthread 实验演示)</title>
+    
+    <!-- 1. 引入 Tailwind CSS 用于样式 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- 2. 引入 React 和 React DOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- 3. 引入 Babel 用于在浏览器中编译 JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <style>
+        /* 防止页面加载时的闪烁 */
+        body { opacity: 0; transition: opacity 0.5s; }
+    </style>
+</head>
+<body class="bg-slate-50">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        // 显式页面加载
+        document.body.style.opacity = 1;
+
+        const { useState, useEffect, useRef, useCallback } = React;
+
+        // --- 图标组件 ---
+        const IconBase = ({ children, size = 24, className = "" }) => (
+            <svg 
+                xmlns="http://www.w3.org/2000/svg" 
+                width={size} 
+                height={size} 
+                viewBox="0 0 24 24" 
+                fill="none" 
+                stroke="currentColor" 
+                strokeWidth="2" 
+                strokeLinecap="round" 
+                strokeLinejoin="round" 
+                className={className}
+            >
+                {children}
+            </svg>
+        );
+
+        const Play = (props) => (
+            <IconBase {...props}>
+                <polygon points="5 3 19 12 5 21 5 3"></polygon>
+            </IconBase>
+        );
+
+        const Pause = (props) => (
+            <IconBase {...props}>
+                <rect x="6" y="4" width="4" height="16"></rect>
+                <rect x="14" y="4" width="4" height="16"></rect>
+            </IconBase>
+        );
+
+        const SkipForward = (props) => (
+            <IconBase {...props}>
+                <polygon points="5 4 15 12 5 20 5 4"></polygon>
+                <line x1="19" y1="5" x2="19" y2="19"></line>
+            </IconBase>
+        );
+
+        const RotateCcw = (props) => (
+            <IconBase {...props}>
+                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path>
+                <path d="M3 3v5h5"></path>
+            </IconBase>
+        );
+
+        const Settings = (props) => (
+            <IconBase {...props}>
+                <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.47a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
+                <circle cx="12" cy="12" r="3"></circle>
+            </IconBase>
+        );
+
+        const ArrowRight = (props) => (
+            <IconBase {...props}>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+                <polyline points="12 5 19 12 12 19"></polyline>
+            </IconBase>
+        );
+
+        const Layers = (props) => (
+            <IconBase {...props}>
+                <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+                <polyline points="2 17 12 22 22 17"></polyline>
+                <polyline points="2 12 12 17 22 12"></polyline>
+            </IconBase>
+        );
+
+        const Cpu = (props) => (
+            <IconBase {...props}>
+                <rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect>
+                <rect x="9" y="9" width="6" height="6"></rect>
+                <line x1="9" y1="1" x2="9" y2="4"></line>
+                <line x1="15" y1="1" x2="15" y2="4"></line>
+                <line x1="9" y1="20" x2="9" y2="23"></line>
+                <line x1="15" y1="20" x2="15" y2="23"></line>
+                <line x1="20" y1="9" x2="23" y2="9"></line>
+                <line x1="20" y1="14" x2="23" y2="14"></line>
+                <line x1="1" y1="9" x2="4" y2="9"></line>
+                <line x1="1" y1="14" x2="4" y2="14"></line>
+            </IconBase>
+        );
+
+        // --- 常量定义 ---
+
+        const GAUSSIAN_KERNEL_5x5 = [
+            [0.003, 0.013, 0.022, 0.013, 0.003],
+            [0.013, 0.059, 0.097, 0.059, 0.013],
+            [0.022, 0.097, 0.159, 0.097, 0.022],
+            [0.013, 0.059, 0.097, 0.059, 0.013],
+            [0.003, 0.013, 0.022, 0.013, 0.003]
+        ];
+
+        const KERNEL_RADIUS = 2; 
+        const GRID_SIZE = 10; 
+        const CELL_SIZE = 40; 
+        const GAP_SIZE = 4;
+        const TOTAL_CELL_SIZE = CELL_SIZE + GAP_SIZE;
+
+        // 生成随机像素矩阵
+        const generateRandomMatrix = (size) => {
+            const matrix = [];
+            for (let y = 0; y < size; y++) {
+                const row = [];
+                for (let x = 0; x < size; x++) {
+                    const val = Math.random() > 0.85 ? 255 : Math.floor(Math.random() * 80); 
+                    row.push(val);
+                }
+                matrix.push(row);
+            }
+            return matrix;
+        };
+
+        const App = () => {
+            // --- 状态管理 ---
+            const [inputMatrix, setInputMatrix] = useState(generateRandomMatrix(GRID_SIZE));
+            const [outputMatrix, setOutputMatrix] = useState(Array(GRID_SIZE).fill().map(() => Array(GRID_SIZE).fill(null)));
+            const [isAnimating, setIsAnimating] = useState(false);
+            const [speed, setSpeed] = useState(300); 
+            const timerRef = useRef(null);
+
+            // 模式状态: 'serial' 或 'parallel'
+            const [mode, setMode] = useState('serial');
+
+            // 游标状态 (数组，支持多个线程)
+            // Fix: Initialize with default serial state to prevent render crash on first load
+            const [cursors, setCursors] = useState([
+                { id: 0, x: 0, y: 0, startY: 0, endY: 10, finished: false, colorClass: 'border-blue-500', bgClass: 'bg-blue-400/20', ringClass: 'ring-blue-500', label: 'Main Thread' }
+            ]);
+
+            // 初始化/重置
+            const initializeCursors = useCallback((selectedMode) => {
+                if (selectedMode === 'serial') {
+                    // 单线程：负责 0-9 行
+                    setCursors([
+                        { id: 0, x: 0, y: 0, startY: 0, endY: 10, finished: false, colorClass: 'border-blue-500', bgClass: 'bg-blue-400/20', ringClass: 'ring-blue-500', label: 'Main Thread' }
+                    ]);
+                } else {
+                    // 双线程并行：Thread 1 (0-4行), Thread 2 (5-9行)
+                    setCursors([
+                        { id: 1, x: 0, y: 0, startY: 0, endY: 5, finished: false, colorClass: 'border-cyan-500', bgClass: 'bg-cyan-400/20', ringClass: 'ring-cyan-500', label: 'Thread 1' },
+                        { id: 2, x: 0, y: 5, startY: 5, endY: 10, finished: false, colorClass: 'border-purple-500', bgClass: 'bg-purple-400/20', ringClass: 'ring-purple-500', label: 'Thread 2' }
+                    ]);
+                }
+                setOutputMatrix(Array(GRID_SIZE).fill().map(() => Array(GRID_SIZE).fill(null)));
+                setIsAnimating(false);
+            }, []);
+
+            // 切换模式
+            const toggleMode = () => {
+                const newMode = mode === 'serial' ? 'parallel' : 'serial';
+                setMode(newMode);
+                initializeCursors(newMode);
+                // 重新生成随机图增加新鲜感
+                setInputMatrix(generateRandomMatrix(GRID_SIZE));
+            };
+
+            // --- 核心卷积计算 (纯函数) ---
+            const calculatePixel = (cx, cy, matrix) => {
+                let sumR = 0;
+                for (let ky = -KERNEL_RADIUS; ky <= KERNEL_RADIUS; ky++) {
+                    for (let kx = -KERNEL_RADIUS; kx <= KERNEL_RADIUS; kx++) {
+                        const nx = cx + kx;
+                        const ny = cy + ky;
+                        const weight = GAUSSIAN_KERNEL_5x5[ky + KERNEL_RADIUS][kx + KERNEL_RADIUS];
+                        let pixelVal = 0;
+                        if (nx >= 0 && nx < GRID_SIZE && ny >= 0 && ny < GRID_SIZE) {
+                            pixelVal = matrix[ny][nx];
+                        } else {
+                            pixelVal = 0; // Padding
+                        }
+                        sumR += pixelVal * weight;
+                    }
+                }
+                return { result: Math.min(Math.max(Math.round(sumR), 0), 255), rawSum: sumR };
+            };
+
+            // --- 动画步进逻辑 ---
+            const step = useCallback(() => {
+                setCursors(prevCursors => {
+                    // 检查是否所有线程都已完成
+                    const allFinished = prevCursors.every(c => c.finished);
+                    if (allFinished) {
+                        setIsAnimating(false);
+                        return prevCursors;
+                    }
+
+                    // 创建新矩阵（深拷贝）以便更新
+                    // 注意：React 状态更新是异步的，我们需要在回调中直接使用最新的 outputMatrix 副本
+                    // 这里稍微复杂，因为我们需要 modify outputMatrix
+                    // 为了简化，我们在 setCursors 内部触发 setOutputMatrix
+                    
+                    const nextCursors = prevCursors.map(cursor => {
+                        if (cursor.finished) return cursor;
+
+                        // 1. 计算当前像素
+                        // 注意：这里需要最新的 inputMatrix，它在闭包中可能不是最新的吗？
+                        // 由于 step 依赖 inputMatrix，所以没问题。
+                        
+                        // 2. 移动游标
+                        let nextX = cursor.x + 1;
+                        let nextY = cursor.y;
+                        let isFinished = cursor.finished;
+
+                        if (nextX >= GRID_SIZE) {
+                            nextX = 0;
+                            nextY = cursor.y + 1;
+                            if (nextY >= cursor.endY) {
+                                isFinished = true;
+                            }
+                        }
+
+                        return { ...cursor, x: nextX, y: nextY, finished: isFinished };
+                    });
+
+                    // 立即根据*旧*游标位置更新 outputMatrix
+                    setOutputMatrix(prevOutput => {
+                        const nextOutput = prevOutput.map(row => [...row]);
+                        prevCursors.forEach(cursor => {
+                            if (!cursor.finished) {
+                                const { result } = calculatePixel(cursor.x, cursor.y, inputMatrix);
+                                nextOutput[cursor.y][cursor.x] = result;
+                            }
+                        });
+                        return nextOutput;
+                    });
+
+                    // 如果所有新游标都完成了，停止动画
+                    if (nextCursors.every(c => c.finished)) {
+                        setIsAnimating(false);
+                    }
+
+                    return nextCursors;
+                });
+            }, [inputMatrix]);
+
+            // 定时器
+            useEffect(() => {
+                if (isAnimating) {
+                    timerRef.current = setInterval(step, speed);
+                } else {
+                    clearInterval(timerRef.current);
+                }
+                return () => clearInterval(timerRef.current);
+            }, [isAnimating, step, speed]);
+
+            const handleReset = () => {
+                initializeCursors(mode);
+            };
+
+            const getCellColor = (val) => {
+                if (val === null) return 'rgba(240, 240, 240, 1)';
+                return `rgb(${val}, ${val}, ${val})`;
+            };
+
+            // 获取当前用于显示的计算详情（仅显示第一个未完成的线程，避免信息过载）
+            const activeCursor = cursors.find(c => !c.finished) || cursors[0];
+            
+            // Fix: Add guard clause to ensure activeCursor exists before accessing properties
+            if (!activeCursor) return null;
+
+            const currentCalcDetails = calculatePixel(activeCursor.x, activeCursor.y, inputMatrix);
+
+            return (
+                <div className="flex flex-col min-h-screen bg-slate-50 font-sans text-slate-800">
+                
+                {/* 顶部栏 */}
+                <header className="bg-slate-900 text-white p-4 shadow-md z-30 sticky top-0">
+                    <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4">
+                        <div>
+                            <h1 className="text-xl font-bold flex items-center gap-2">
+                                <Settings className="w-6 h-6 text-blue-400" />
+                                卷积并行加速演示 (Pthread)
+                            </h1>
+                        </div>
+                        
+                        <div className="flex flex-wrap items-center gap-4 justify-center">
+                            
+                            {/* 模式切换按钮 */}
+                            <div className="flex items-center bg-slate-800 p-1 rounded-lg border border-slate-700">
+                                <button 
+                                    onClick={() => mode !== 'serial' && toggleMode()}
+                                    className={`px-3 py-1.5 text-sm rounded-md transition-all flex items-center gap-2 ${mode === 'serial' ? 'bg-blue-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}
+                                >
+                                    <Cpu size={16} /> 单线程 (Serial)
+                                </button>
+                                <button 
+                                    onClick={() => mode !== 'parallel' && toggleMode()}
+                                    className={`px-3 py-1.5 text-sm rounded-md transition-all flex items-center gap-2 ${mode === 'parallel' ? 'bg-purple-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}
+                                >
+                                    <Layers size={16} /> 双线程并行 (Parallel)
+                                </button>
+                            </div>
+
+                            <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700">
+                                <button 
+                                    onClick={() => setIsAnimating(!isAnimating)}
+                                    className={`px-4 py-1.5 rounded-md transition-colors flex items-center gap-2 font-medium text-sm ${isAnimating ? 'bg-red-500 hover:bg-red-600' : 'bg-green-500 hover:bg-green-600'}`}
+                                >
+                                    {isAnimating ? <React.Fragment><Pause size={16} /> 暂停</React.Fragment> : <React.Fragment><Play size={16} /> {cursors.every(c=>c.finished) ? "重新开始" : "运行"}</React.Fragment>}
+                                </button>
+                                <button 
+                                    onClick={step}
+                                    disabled={isAnimating || cursors.every(c=>c.finished)}
+                                    className="p-1.5 hover:bg-slate-700 rounded-md text-gray-300 disabled:opacity-50 ml-1"
+                                    title="单步执行"
+                                >
+                                    <SkipForward size={16} />
+                                </button>
+                                <button 
+                                    onClick={handleReset}
+                                    className="p-1.5 hover:bg-slate-700 rounded-md text-gray-300 ml-1"
+                                    title="重置"
+                                >
+                                    <RotateCcw size={16} />
+                                </button>
+                            </div>
+                            
+                            <div className="flex items-center gap-2 bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700">
+                                <span className="text-xs text-gray-400">速度</span>
+                                <input 
+                                    type="range" 
+                                    min="10" 
+                                    max="800" 
+                                    step="50"
+                                    value={810 - speed} 
+                                    onChange={(e) => setSpeed(810 - Number(e.target.value))}
+                                    className="w-20 h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer"
+                                />
+                            </div>
+                        </div>
+                    </div>
+                </header>
+
+                {/* 主内容区 */}
+                <main className="flex-1 max-w-7xl mx-auto w-full p-4 flex flex-col gap-6">
+                    
+                    {/* 上半部分：左右两个大图对比 */}
+                    <div className="flex flex-col lg:flex-row justify-center items-start gap-8 lg:gap-16">
+                    
+                        {/* 左侧：输入矩阵 */}
+                        <div className="flex flex-col items-center">
+                            <h2 className="text-lg font-bold mb-4 text-slate-700 flex items-center gap-2">
+                                <span className="bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded">原始数据</span>
+                                源图像 (Input)
+                            </h2>
+                            
+                            <div className="relative p-6 bg-white rounded-xl shadow-lg border border-slate-200">
+                                {/* 基础网格 */}
+                                <div 
+                                    className="grid gap-1 relative z-0"
+                                    style={{ gridTemplateColumns: `repeat(${GRID_SIZE}, ${CELL_SIZE}px)` }}
+                                >
+                                    {inputMatrix.map((row, y) => (
+                                    row.map((val, x) => {
+                                        // 标记属于哪个线程的区域
+                                        let regionClass = "";
+                                        if (mode === 'parallel') {
+                                            if (y < 5) regionClass = "border-cyan-100"; // Thread 1 区域
+                                            else regionClass = "border-purple-100";     // Thread 2 区域
+                                        } else {
+                                            regionClass = "border-slate-100";
+                                        }
+
+                                        return (
+                                            <div 
+                                                key={`in-${x}-${y}`}
+                                                className={`flex items-center justify-center text-[10px] select-none rounded-sm border ${regionClass}`}
+                                                style={{ 
+                                                    width: CELL_SIZE, 
+                                                    height: CELL_SIZE,
+                                                    backgroundColor: getCellColor(val),
+                                                    color: val > 128 ? '#000' : '#fff'
+                                                }}
+                                            >
+                                                {val}
+                                            </div>
+                                        );
+                                    })
+                                    ))}
+                                </div>
+
+                                {/* 多线程悬浮窗口层 (Overlay) */}
+                                {cursors.map((cursor) => {
+                                    if (cursor.finished) return null;
+                                    return (
+                                        <div 
+                                            key={`cursor-${cursor.id}`}
+                                            className="absolute top-6 left-6 pointer-events-none transition-transform duration-200 ease-out z-10"
+                                            style={{
+                                                transform: `translate(${(cursor.x - KERNEL_RADIUS) * TOTAL_CELL_SIZE}px, ${(cursor.y - KERNEL_RADIUS) * TOTAL_CELL_SIZE}px)`
+                                            }}
+                                        >
+                                            <div 
+                                                className="grid gap-1"
+                                                style={{ gridTemplateColumns: `repeat(5, ${CELL_SIZE}px)` }}
+                                            >
+                                                {Array.from({ length: 25 }).map((_, idx) => {
+                                                    const kx = (idx % 5) - 2;
+                                                    const ky = Math.floor(idx / 5) - 2;
+                                                    const nx = cursor.x + kx;
+                                                    const ny = cursor.y + ky;
+                                                    const isOutOfBounds = nx < 0 || nx >= GRID_SIZE || ny < 0 || ny >= GRID_SIZE;
+
+                                                    return (
+                                                        <div 
+                                                            key={`kern-${cursor.id}-${idx}`}
+                                                            className={`
+                                                                flex items-center justify-center text-xs font-bold border-2 transition-all
+                                                                ${isOutOfBounds 
+                                                                    ? 'bg-slate-800/80 text-white border-dashed border-slate-400 opacity-90' 
+                                                                    : `${cursor.colorClass} ${cursor.bgClass} text-transparent`
+                                                                }
+                                                                ${kx === 0 && ky === 0 ? `ring-2 ${cursor.ringClass} ring-offset-1 z-20` : ''}
+                                                            `}
+                                                            style={{ width: CELL_SIZE, height: CELL_SIZE }}
+                                                        >
+                                                            {isOutOfBounds && "0"}
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                            {/* 整体外框 */}
+                                            <div className={`absolute inset-0 border-4 ${cursor.colorClass} rounded-lg opacity-80 -m-0.5`}></div>
+                                            
+                                            {/* 线程标签 */}
+                                            <div className="absolute -top-6 left-0 w-full text-center">
+                                                <span className={`text-[10px] px-2 py-0.5 rounded text-white shadow whitespace-nowrap ${cursor.id === 1 || cursor.id === 0 ? 'bg-cyan-600' : 'bg-purple-600'}`}>
+                                                    {cursor.label} (5x5)
+                                                </span>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+
+                                {mode === 'parallel' && (
+                                    <div className="absolute top-1/2 left-0 w-full h-0.5 bg-dashed border-t-2 border-slate-300 pointer-events-none z-0" style={{ marginTop: '-2px' }}>
+                                        <span className="absolute right-[-80px] top-[-10px] text-xs text-slate-400 bg-white px-1">Row Decomposition</span>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* 指示箭头 */}
+                        <div className="hidden lg:flex flex-col items-center justify-center pt-32 opacity-50">
+                            <ArrowRight size={48} className="text-slate-400" />
+                            <div className="text-center mt-2">
+                                <span className="block text-xs font-bold text-slate-500">CONVOLUTION</span>
+                                {mode === 'parallel' && <span className="block text-[10px] text-purple-500">PARALLEL x2</span>}
+                            </div>
+                        </div>
+
+                        {/* 右侧：结果图像 */}
+                        <div className="flex flex-col items-center">
+                            <h2 className="text-lg font-bold mb-4 text-slate-700 flex items-center gap-2">
+                                <span className="bg-green-100 text-green-800 text-xs px-2 py-1 rounded">处理结果</span>
+                                结果图像 (Output)
+                            </h2>
+                            
+                            <div className="p-6 bg-white rounded-xl shadow-lg border border-slate-200 relative">
+                                <div 
+                                    className="grid gap-1"
+                                    style={{ gridTemplateColumns: `repeat(${GRID_SIZE}, ${CELL_SIZE}px)` }}
+                                >
+                                    {outputMatrix.map((row, y) => (
+                                    row.map((val, x) => {
+                                        // 查找当前正在写入此像素的游标
+                                        const activeWriter = cursors.find(c => c.x === x && c.y === y && !c.finished);
+                                        
+                                        let cellClass = "border border-slate-100";
+                                        if (activeWriter) {
+                                            cellClass = `ring-4 ${activeWriter.ringClass} z-10 scale-110 shadow-lg font-bold`;
+                                        }
+
+                                        return (
+                                            <div 
+                                                key={`out-${x}-${y}`}
+                                                className={`
+                                                    flex items-center justify-center text-[10px] select-none rounded-sm transition-all duration-300
+                                                    ${cellClass}
+                                                `}
+                                                style={{ 
+                                                    width: CELL_SIZE, 
+                                                    height: CELL_SIZE,
+                                                    backgroundColor: getCellColor(val),
+                                                    color: val !== null ? (val > 128 ? '#000' : '#fff') : '#999'
+                                                }}
+                                            >
+                                                {val !== null ? val : '.'}
+                                            </div>
+                                        );
+                                    })
+                                    ))}
+                                </div>
+                            </div>
+                             <div className="mt-2 text-xs text-slate-500 text-center flex gap-4 justify-center">
+                                {mode === 'parallel' ? (
+                                    <React.Fragment>
+                                        <div className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-cyan-500"></span> Thread 1</div>
+                                        <div className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-purple-500"></span> Thread 2</div>
+                                    </React.Fragment>
+                                ) : (
+                                    <span>绿色/蓝色高亮表示正在计算</span>
+                                )}
+                            </div>
+                        </div>
+
+                    </div>
+
+                    {/* 下半部分：详细信息面板 */}
+                    <div className="mt-4 grid md:grid-cols-2 gap-6 bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+                    
+                        {/* 左下：权重展示 */}
+                        <div>
+                            <h3 className="text-sm font-bold text-slate-700 mb-3 border-b pb-2">5x5 高斯核权重 (Gaussian Kernel)</h3>
+                            <div className="flex gap-4">
+                                <div className="grid grid-cols-5 gap-1 bg-slate-50 p-2 rounded border border-slate-200">
+                                    {GAUSSIAN_KERNEL_5x5.map((row, ky) => (
+                                    row.map((w, kx) => (
+                                        <div key={`${kx}-${ky}`} className="w-8 h-8 flex items-center justify-center text-[9px] text-slate-600 bg-white rounded shadow-sm">
+                                        {w.toFixed(3).substring(1)}
+                                        </div>
+                                    ))
+                                    ))}
+                                </div>
+                                <div className="flex-1 text-xs text-slate-600 flex flex-col justify-center gap-2">
+                                    <p className="font-semibold text-slate-800">实验原理 (并行)：</p>
+                                    <p>● <span className="text-blue-600 font-bold">按行分解 (Row Decomposition)</span>：将图像高度 H 分为 N 个块，每个线程独立处理 H/N 行。</p>
+                                    <p>● <span className="text-blue-600 font-bold">无锁 (Lock-free)</span>：线程写入互不重叠的内存区域，无需互斥锁，并行效率高。</p>
+                                    <p>● <span className="text-blue-600 font-bold">加速比</span>：理论上双线程可接近 2 倍速 (实际受内存带宽限制)。</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* 右下：当前计算详情 */}
+                        <div>
+                            <h3 className="text-sm font-bold text-slate-700 mb-3 border-b pb-2 flex justify-between">
+                                <span>实时计算监控 ({activeCursor.label})</span>
+                                <span className="text-xs font-normal text-slate-400">坐标: ({activeCursor.x}, {activeCursor.y})</span>
+                            </h3>
+                            <div className="flex items-center justify-between bg-slate-900 text-green-400 p-4 rounded-lg font-mono">
+                                <div className="flex flex-col gap-1">
+                                    <span className="text-slate-400 text-xs">RAW SUM</span>
+                                    <span className="text-xl">{currentCalcDetails.rawSum.toFixed(4)}</span>
+                                </div>
+                                <ArrowRight className="text-slate-600" />
+                                <div className="flex flex-col gap-1 text-right">
+                                    <span className="text-slate-400 text-xs">RESULT (0-255)</span>
+                                    <span className="text-3xl font-bold text-white">{currentCalcDetails.result}</span>
+                                </div>
+                            </div>
+                            <div className="mt-3 text-xs text-slate-500 flex justify-between">
+                                <span>* 并行模式下，多个核心同时执行此计算逻辑。</span>
+                                {mode === 'parallel' && <span className="text-purple-600 font-bold">Parallel Active</span>}
+                            </div>
+                        </div>
+
+                    </div>
+                </main>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>

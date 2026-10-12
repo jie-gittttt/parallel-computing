@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MPI 矩陣運算 i-k-j 優化 (Loop Interchange)</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- Babel -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+
+    <style>
+        body { font-family: 'Noto Sans TC', sans-serif; }
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
+        .cell-enter { animation: fadeIn 0.5s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: scale(0.8); } to { opacity: 1; transform: scale(1); } }
+        .code-line { border-left: 3px solid transparent; padding-left: 8px; transition: all 0.1s; }
+        .code-active { border-left-color: #f59e0b; background-color: rgba(245, 158, 11, 0.1); color: #f59e0b; font-weight: bold; }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-200 h-screen overflow-hidden flex flex-col">
+
+    <div id="root" class="h-full w-full"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // --- Icons ---
+        const PlayIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>;
+        const PauseIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>;
+        const RotateCcwIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path><path d="M3 3v5h5"></path></svg>;
+        const FlameIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.113.434-2.154 1.157-3a2.5 2.5 0 0 0 2.343 2.5z"></path></svg>;
+
+        // --- Constants ---
+        const ROWS_A = 7;
+        const COLS_A = 8; // N = 8
+        const COLS_B = 7; // K = 7
+        
+        const rankColors = { 0: 'bg-red-500', 1: 'bg-blue-500', 2: 'bg-amber-500', 3: 'bg-purple-500' };
+        const rankText = { 0: 'text-red-400', 1: 'text-blue-400', 2: 'text-amber-400', 3: 'text-purple-400' };
+
+        // --- Mock Data ---
+        const generateMatrix = (rows, cols, offset) => {
+            const m = [];
+            for(let i=0; i<rows; i++) {
+                const row = [];
+                for(let j=0; j<cols; j++) row.push((i+1) + (j+1) + offset);
+                m.push(row);
+            }
+            return m;
+        };
+
+        const matrixA = generateMatrix(ROWS_A, COLS_A, 0);
+        const matrixB = generateMatrix(COLS_A, COLS_B, 5); // 8x7
+
+        const MainApp = () => {
+            const [activeRank, setActiveRank] = useState(0);
+            // Loop Variables in i-k-j order
+            const [i, setI] = useState(0); // Outer: Row of A
+            const [k, setK] = useState(0); // Middle: Col of A / Row of B
+            const [j, setJ] = useState(0); // Inner: Col of B
+            
+            const [computedD, setComputedD] = useState(Array(ROWS_A).fill().map(() => Array(COLS_B).fill(0)));
+            
+            const [isAnimating, setIsAnimating] = useState(false);
+            const [speed, setSpeed] = useState(50); // Default Fast
+
+            const getRankForRow = (rowIdx) => {
+                if (rowIdx < 2) return 0;
+                if (rowIdx < 4) return 1;
+                if (rowIdx < 6) return 2;
+                return 3;
+            };
+
+            useEffect(() => {
+                let timer;
+                if (isAnimating) {
+                    timer = setTimeout(() => {
+                        // Current Step Logic: i-k-j
+                        // D[i][j] += A[i][k] * B[k][j]
+                        
+                        const valA = matrixA[i][k];
+                        const valB = matrixB[k][j];
+                        const delta = valA * valB;
+
+                        // Update D immediately
+                        const newD = [...computedD];
+                        newD[i] = [...newD[i]];
+                        newD[i][j] += delta;
+                        setComputedD(newD);
+
+                        // Advance Indices: Inner j -> Middle k -> Outer i
+                        let nextJ = j + 1;
+                        let nextK = k;
+                        let nextI = i;
+
+                        if (nextJ >= COLS_B) {
+                            nextJ = 0;
+                            nextK++;
+                            if (nextK >= COLS_A) {
+                                nextK = 0;
+                                nextI++;
+                                if (nextI >= ROWS_A) {
+                                    setIsAnimating(false);
+                                    return;
+                                }
+                                setActiveRank(getRankForRow(nextI));
+                            }
+                        }
+
+                        setJ(nextJ);
+                        setK(nextK);
+                        setI(nextI);
+
+                    }, speed);
+                }
+                return () => clearTimeout(timer);
+            }, [isAnimating, j, k, i, speed, computedD]);
+
+            const reset = () => {
+                setIsAnimating(false);
+                setI(0); setK(0); setJ(0);
+                setActiveRank(0);
+                setComputedD(Array(ROWS_A).fill().map(() => Array(COLS_B).fill(0)));
+            };
+
+            // Determine Active Code Line
+            // Simplified mapping
+            let activeLine = 0;
+            // Inside j loop most of the time
+            activeLine = 7; 
+
+            return (
+                <div className="flex flex-col h-full w-full max-w-6xl mx-auto p-4">
+                    
+                    <header className="flex justify-between items-center mb-6 bg-slate-900 p-4 rounded-xl border border-slate-800">
+                        <div>
+                            <h1 className="text-lg font-bold text-white flex items-center gap-2">
+                                <FlameIcon className="text-amber-500" />
+                                <span className="text-amber-500">MPI</span> i-k-j 優化循環演示
+                            </h1>
+                            <div className="text-xs text-slate-400 font-mono mt-1 flex gap-4">
+                                <span>Rank: <span className={rankText[activeRank]}>{activeRank}</span></span>
+                                <span>Outer(i): <span className="text-white">{i}</span></span>
+                                <span>Mid(k): <span className="text-white">{k}</span></span>
+                                <span>Inner(j): <span className="text-white">{j}</span></span>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-4">
+                            <div className="flex items-center gap-2 text-xs text-slate-400">
+                                <span>速度:</span>
+                                <input type="range" min="10" max="500" step="10" value={speed} onChange={(e) => setSpeed(Number(e.target.value))} className="w-24 accent-amber-500"/>
+                            </div>
+                            <button onClick={() => setIsAnimating(!isAnimating)} className="p-2 bg-amber-600 rounded-full hover:bg-amber-500 text-white transition-colors">
+                                {isAnimating ? <PauseIcon /> : <PlayIcon />}
+                            </button>
+                            <button onClick={reset} className="p-2 bg-slate-700 rounded-full hover:bg-slate-600 text-white transition-colors">
+                                <RotateCcwIcon />
+                            </button>
+                        </div>
+                    </header>
+
+                    <div className="flex-1 flex gap-6 overflow-hidden">
+                        
+                        {/* LEFT: Visualization */}
+                        <div className="flex-1 flex flex-col items-center justify-center gap-6 bg-slate-900/50 p-4 rounded-xl border border-slate-800">
+                            
+                            <div className="flex gap-8 items-center">
+                                {/* Matrix A */}
+                                <div className="flex flex-col gap-1">
+                                    <div className="text-center text-xs text-slate-400 mb-1">Matrix A</div>
+                                    <div className="grid grid-rows-7 gap-[1px] bg-slate-800 p-1 rounded border border-slate-700">
+                                        {matrixA.map((row, rIdx) => (
+                                            <div key={rIdx} className="grid grid-cols-8 gap-[1px]">
+                                                {row.map((val, cIdx) => {
+                                                    // i-k loop: A[i][k] is the focus
+                                                    const isTarget = rIdx === i && cIdx === k;
+                                                    const isRow = rIdx === i;
+                                                    return (
+                                                        <div key={cIdx} className={`w-8 h-8 flex items-center justify-center text-[10px] font-mono transition-all
+                                                            ${isTarget ? 'bg-amber-500 text-white font-bold scale-125 z-20 shadow-lg shadow-amber-500/50' : ''}
+                                                            ${!isTarget && isRow ? 'bg-amber-900/20 text-amber-500/50' : 'bg-slate-800 text-slate-600'}
+                                                        `}>{val}</div>
+                                                    );
+                                                })}
+                                            </div>
+                                        ))}
+                                    </div>
+                                    <div className="text-[10px] text-center text-amber-500 mt-1 font-bold">
+                                        A[i][k] (固定不變!)
+                                    </div>
+                                </div>
+
+                                <div className="text-xl font-bold text-slate-600">×</div>
+
+                                {/* Matrix B */}
+                                <div className="flex flex-col gap-1">
+                                    <div className="text-center text-xs text-slate-400 mb-1">Matrix B (8x7)</div>
+                                    <div className="grid grid-rows-8 gap-[1px] bg-slate-800 p-1 rounded border border-slate-700">
+                                        {matrixB.map((row, rIdx) => (
+                                            <div key={rIdx} className="grid grid-cols-7 gap-[1px]">
+                                                {row.map((val, cIdx) => {
+                                                    // k-j loop: B[k][j]
+                                                    const isTarget = rIdx === k && cIdx === j;
+                                                    const isRow = rIdx === k; // Scanning this whole row
+                                                    return (
+                                                        <div key={cIdx} className={`w-8 h-8 flex items-center justify-center text-[10px] font-mono transition-all
+                                                            ${isTarget ? 'bg-blue-500 text-white font-bold scale-110 z-10' : ''}
+                                                            ${!isTarget && isRow ? 'bg-blue-900/40 text-blue-300' : 'bg-slate-800 text-slate-600'}
+                                                        `}>{val}</div>
+                                                    );
+                                                })}
+                                            </div>
+                                        ))}
+                                    </div>
+                                    <div className="text-[10px] text-center text-blue-400 mt-1 font-bold">
+                                        B[k][j] (連續掃描 &rarr;)
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="text-xl font-bold text-slate-600">+=</div>
+
+                            {/* Matrix D */}
+                            <div className="flex flex-col gap-1">
+                                <div className="text-center text-xs text-slate-400 mb-1">Matrix D (Accumulating)</div>
+                                <div className="grid grid-rows-7 gap-[1px] bg-slate-800 p-1 rounded border border-slate-700">
+                                    {computedD.map((row, rIdx) => (
+                                        <div key={rIdx} className="grid grid-cols-7 gap-[1px]">
+                                            {row.map((val, cIdx) => {
+                                                // i-j loop: D[i][j]
+                                                const isTarget = rIdx === i && cIdx === j;
+                                                const isRow = rIdx === i;
+                                                const myRank = getRankForRow(rIdx);
+                                                return (
+                                                    <div key={cIdx} className={`w-8 h-8 flex items-center justify-center text-[10px] font-mono transition-all border border-transparent
+                                                        ${isTarget ? 'bg-emerald-600 text-white scale-110 z-10 shadow-lg shadow-emerald-500/30' : ''}
+                                                        ${!isTarget && isRow ? 'bg-slate-700 text-slate-300' : 'bg-slate-900 text-slate-700'}
+                                                    `}>
+                                                        {val}
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="text-[10px] text-center text-emerald-400 mt-1 font-bold">
+                                    D[i][j] (連續寫入 &rarr;)
+                                </div>
+                            </div>
+
+                        </div>
+
+                        {/* RIGHT: Code Panel */}
+                        <div className="w-[420px] flex flex-col gap-4">
+                            
+                            {/* Code */}
+                            <div className="bg-slate-900 rounded-xl border border-slate-800 p-4 font-mono text-xs text-slate-400 shadow-2xl relative">
+                                <div className="absolute top-0 right-0 bg-amber-900/50 text-amber-400 px-2 py-1 text-[10px] rounded-bl">i-k-j Optimization</div>
+                                
+                                <div className={`code-line ${activeLine===0?'code-active':''}`}>for (int i = 0; i &lt; local_rows; ++i) {'{'}</div>
+                                <div className={`code-line ${activeLine===1?'code-active':''}`}>&nbsp;&nbsp;for (int k = 0; k &lt; N; ++k) {'{'}</div>
+                                
+                                <div className={`code-line ${activeLine===3?'code-active':''} my-1`}>
+                                    &nbsp;&nbsp;&nbsp;&nbsp;<span className="text-slate-500">// A[i][k] Invariant in inner loop!</span><br/>
+                                    &nbsp;&nbsp;&nbsp;&nbsp;long long r = A_local[i*N+k];
+                                </div>
+
+                                <div className={`code-line ${activeLine===5?'code-active':''}`}>&nbsp;&nbsp;&nbsp;&nbsp;for (int j = 0; j &lt; K; ++j) {'{'}</div>
+                                
+                                <div className={`code-line ${activeLine===7?'code-active':''} my-1 bg-amber-900/20`}>
+                                    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span className="text-slate-500">// Continuous B[k][j] and D[i][j]</span><br/>
+                                    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;D_local[i*K+j] += r * B[k*K+j];
+                                </div>
+                                
+                                <div className="code-line">&nbsp;&nbsp;&nbsp;&nbsp;{'}'}</div>
+                                <div className="code-line">&nbsp;&nbsp;{'}'}</div>
+                                <div className="code-line">{'}'}</div>
+                            </div>
+
+                            {/* Analysis */}
+                            <div className="bg-slate-900 rounded-xl border border-slate-800 p-4 flex flex-col gap-3 text-xs font-mono">
+                                <div className="flex justify-between border-b border-slate-800 pb-2">
+                                    <span className="text-slate-500">Memory Access Pattern</span>
+                                    <span className="text-amber-500 font-bold">Best!</span>
+                                </div>
+                                <div className="space-y-2">
+                                    <div className="flex justify-between items-center">
+                                        <span className="text-red-400">A[i][k]</span>
+                                        <span className="bg-slate-800 text-slate-300 px-2 py-0.5 rounded text-[10px]">Scalar (Register)</span>
+                                    </div>
+                                    <div className="flex justify-between items-center">
+                                        <span className="text-blue-400">B[k][j]</span>
+                                        <span className="bg-green-900/30 text-green-400 px-2 py-0.5 rounded text-[10px]">Sequential</span>
+                                    </div>
+                                    <div className="flex justify-between items-center">
+                                        <span className="text-emerald-400">D[i][j]</span>
+                                        <span className="bg-green-900/30 text-green-400 px-2 py-0.5 rounded text-[10px]">Sequential</span>
+                                    </div>
+                                </div>
+                                <div className="mt-2 p-2 bg-amber-900/10 border border-amber-900/30 rounded text-amber-200 leading-relaxed">
+                                    <strong>優勢：</strong> 內層循環 `j` 只涉及連續內存訪問。CPU 可以極其高效地預取數據 (Prefetching) 並使用 SIMD 指令 (如 AVX) 一次計算 4/8 個乘加運算。
+                                </div>
+                            </div>
+
+                        </div>
+
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<MainApp />);
+    </script>
+</body>
+</html>

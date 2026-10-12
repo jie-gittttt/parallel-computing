@@ -1,0 +1,61 @@
+$ mpirun -np 1 ./Matrix
+Authorization required, but no authorization protocol specified
+Authorization required, but no authorization protocol specified
+------------------------------------------
+Job Complete.
+Total execution time with 1 processes: 7.710275 seconds
+------------------------------------------
+$ ./verify_ RandMatrix.txt result.txt
+比对成功！
+$ mpirun -np 2 ./Matrix
+Authorization required, but no authorization protocol specified
+Authorization required, but no authorization protocol specified
+------------------------------------------
+Job Complete.
+Total execution time with 2 processes: 3.945504 seconds
+------------------------------------------
+$ ./verify_ RandMatrix.txt result.txt
+比对成功！
+$ mpirun -np 4 ./Matrix
+Authorization required, but no authorization protocol specified
+Authorization required, but no authorization protocol specified
+------------------------------------------
+Job Complete.
+Total execution time with 4 processes: 1.224864 seconds
+------------------------------------------
+$ ./verify_ RandMatrix.txt result.txt
+比对成功！
+
+但是有一个奇怪的现象，修改前的如下
+------------------------------------------
+Job Complete.
+Total execution time with 1 processes: 10.493875 seconds
+------------------------------------------
+$ mpirun -np 2 ./Matrix
+Authorization required, but no authorization protocol specified
+Authorization required, but no authorization protocol specified
+------------------------------------------
+Job Complete.
+Total execution time with 2 processes: 6.659056 seconds
+------------------------------------------
+$ mpirun -np 4 ./Matrix
+Authorization required, but no authorization protocol specified
+Authorization required, but no authorization protocol specified
+------------------------------------------
+Job Complete.
+Total execution time with 4 processes: 3.398177 seconds
+------------------------------------------
+
+但是我上周做这个作业用的也是修改前的代码，结果却不一样
+------------------------------------------
+Job Complete.
+Total execution time with 1 processes: 5.400121 seconds
+------------------------------------------
+------------------------------------------
+Job Complete.
+Total execution time with 2 processes: 4.135167 seconds
+------------------------------------------
+------------------------------------------
+Job Complete.
+Total execution time with 4 processes: 3.033115 seconds
+------------------------------------------

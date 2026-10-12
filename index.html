@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>并行与分布式系统 · 课程实验 · 原理演示</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --card: #171a21;
+    --card-hover: #1e222b;
+    --line: #272c36;
+    --fg: #e6e9ef;
+    --dim: #8b93a5;
+    --accent: #5b9dff;
+    --c1: #ff7a59;
+    --c2: #4ec9a0;
+    --c3: #b48ef0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 56px 24px 96px;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.65 -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  h1 {
+    font-size: 30px; margin: 0 0 10px; letter-spacing: -0.02em;
+  }
+  .sub { color: var(--dim); margin: 0 0 8px; font-size: 15px; }
+  .hint {
+    color: var(--dim); font-size: 13.5px;
+    border-left: 2px solid var(--line); padding-left: 12px; margin: 26px 0 40px;
+  }
+  .hint code {
+    background: var(--card); padding: 1px 6px; border-radius: 4px;
+    font-size: 12.5px; color: var(--fg);
+  }
+  section { margin-bottom: 48px; }
+  h2 {
+    font-size: 13px; font-weight: 600; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--dim);
+    margin: 0 0 18px; padding-bottom: 10px;
+    border-bottom: 1px solid var(--line);
+    display: flex; align-items: baseline; gap: 10px;
+  }
+  h2 .tag {
+    font-size: 11px; letter-spacing: 0.04em; text-transform: none;
+    color: var(--fg); opacity: .55; font-weight: 400;
+  }
+  h2::before {
+    content: ''; width: 8px; height: 8px; border-radius: 50%;
+    flex: none; align-self: center;
+  }
+  .g1 h2::before { background: var(--c1); }
+  .g2 h2::before { background: var(--c2); }
+  .g3 h2::before { background: var(--c3); }
+  .grid {
+    display: grid; gap: 14px;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  }
+  a.card {
+    display: block; text-decoration: none; color: inherit;
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 10px; padding: 18px 20px;
+    transition: background .15s, border-color .15s, transform .15s;
+  }
+  a.card:hover {
+    background: var(--card-hover);
+    border-color: #3a4150;
+    transform: translateY(-2px);
+  }
+  a.card .t { font-weight: 600; font-size: 15px; margin-bottom: 6px; }
+  a.card .d { color: var(--dim); font-size: 13.5px; line-height: 1.55; }
+  a.card .m {
+    margin-top: 10px; font-size: 11.5px; color: #5f6878;
+    font-family: ui-monospace, Consolas, monospace;
+  }
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 22px;
+    margin-top: 8px; padding-top: 26px; border-top: 1px solid var(--line);
+    font-size: 13px; color: var(--dim);
+  }
+  .legend span { display: flex; align-items: center; gap: 8px; }
+  .legend i { width: 8px; height: 8px; border-radius: 50%; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>并行与分布式系统 · 原理演示</h1>
+  <p class="sub">三次课程实验的算法过程可视化 —— MPI 消息传递 · Pthread / OpenMP 共享内存 · CUDA 异构计算</p>
+  <p class="hint">
+    每个页面都是静态 HTML，双击即可打开，不需要服务器；页面依赖几个公开 CDN
+    （Tailwind CSS、React 18、Babel standalone、Lucide），打开时需要联网。
+    用页面 URL 访问：<code>&lt;用户名&gt;.github.io/parallel-computing/…</code>
+  </p>
+
+  <section class="g1">
+    <h2>01 · MPI 矩阵运算 <span class="tag">D = A×B + C，循环变换</span></h2>
+    <div class="grid">
+      <a class="card" href="01-mpi-matrix-multiplication/docs/mpi-loop-interchange.html">
+        <div class="t">i-k-j 循环交换</div>
+        <div class="d">逐格演示三重循环的访存顺序，直观对比 i-j-k 与 i-k-j 两种嵌套下每个 cache line 的复用情况。</div>
+        <div class="m">mpi-loop-interchange.html</div>
+      </a>
+      <a class="card" href="01-mpi-matrix-multiplication/docs/mpi-transpose.html">
+        <div class="t">B 转置优化</div>
+        <div class="d">用 7×8 缩微矩阵展开完整计算流程，对比原版与 B 转置版如何把跨行访问变成连续访问。</div>
+        <div class="m">mpi-transpose.html</div>
+      </a>
+    </div>
+  </section>
+
+  <section class="g2">
+    <h2>02 · Pthread / OpenMP 卷积 <span class="tag">5×5 高斯，σ = 1.5</span></h2>
+    <div class="grid">
+      <a class="card" href="02-pthread-openmp-convolution/docs/convolution.html">
+        <div class="t">卷积过程</div>
+        <div class="d">像素窗口如何在图像上滑动，5×5 邻域如何加权求和成一个像素。</div>
+        <div class="m">convolution.html</div>
+      </a>
+      <a class="card" href="02-pthread-openmp-convolution/docs/convolution-optimized.html">
+        <div class="t">可分离卷积</div>
+        <div class="d">把二维卷积拆成水平 + 垂直两趟一维卷积，逐阶段对照 O(K²) → O(2K) 的计算量差异。</div>
+        <div class="m">convolution-optimized.html</div>
+      </a>
+      <a class="card" href="02-pthread-openmp-convolution/docs/convolution-parallel.html">
+        <div class="t">按行并行的负载均衡</div>
+        <div class="d">图像行如何分配给多个线程，以及静态划分与动态调度下各线程完成时间的差异。</div>
+        <div class="m">convolution-parallel.html</div>
+      </a>
+    </div>
+  </section>
+
+  <section class="g3">
+    <h2>03 · CUDA 卷积池化 <span class="tag">4096×2304，算子融合</span></h2>
+    <div class="grid">
+      <a class="card" href="03-cuda-convolution-pooling/docs/cuda-pipeline.html">
+        <div class="t">异构计算全流程</div>
+        <div class="d">Host 与 Device 之间的数据流转：分配、拷贝、启动 kernel、回传的完整管道。</div>
+        <div class="m">cuda-pipeline.html</div>
+      </a>
+      <a class="card" href="03-cuda-convolution-pooling/docs/cuda-mapping.html">
+        <div class="t">Grid / Warp 映射</div>
+        <div class="d">blockIdx 与 threadIdx 如何映射到全局内存坐标，含 Warp 级可视化与合并访存（coalescing）演示。</div>
+        <div class="m">cuda-mapping.html</div>
+      </a>
+      <a class="card" href="03-cuda-convolution-pooling/docs/cuda-fusion.html">
+        <div class="t">算子融合微观机制</div>
+        <div class="d">卷积与池化如何在单个线程的寄存器里串起来完成，访存从 4 次降到 1 次。</div>
+        <div class="m">cuda-fusion.html</div>
+      </a>
+      <a class="card" href="03-cuda-convolution-pooling/docs/cuda-bandwidth.html">
+        <div class="t">显存带宽 vs 算术强度</div>
+        <div class="d">一个 kernel 究竟是计算受限还是带宽受限？用算术强度判断优化的方向。</div>
+        <div class="m">cuda-bandwidth.html</div>
+      </a>
+    </div>
+  </section>
+
+  <div class="legend">
+    <span><i style="background:var(--c1)"></i> 作业 01 · MPI 消息传递</span>
+    <span><i style="background:var(--c2)"></i> 作业 02 · Pthread / OpenMP</span>
+    <span><i style="background:var(--c3)"></i> 作业 03 · CUDA</span>
+    <span style="margin-left:auto"><a href="https://github.com/" style="color:var(--dim)">← 返回仓库</a></span>
+  </div>
+
+</div>
+</body>
+</html>

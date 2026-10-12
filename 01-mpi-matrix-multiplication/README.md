@@ -1,149 +1,230 @@
-# 作业 01 · 基于 MPI 的基本矩阵运算及优化
+# MPI Matrix Multiplication — D = A×B + C
 
-用 MPI 消息传递实现 `D = A×B + C` 的分布式计算，并通过**循环变换**优化单进程的访存效率。
-矩阵规模 1023×1023（`M = N = K = 1023`），不使用任何共享内存。
+[English](README.md) | [中文](README.zh-CN.md)
 
-```bash
-mpic++ -o Matrix src/Matrix.cpp -std=c++11
-mpirun -np 4 ./Matrix          # 读 RandMatrix.txt，输出 result.txt
+A distributed matrix computation over MPI, where the decisive speedup came from reordering
+the loops for cache locality rather than from adding processes.
+
+## 1. Overview
+
+The task is to compute `D = A×B + C` for three 1023×1023 double-precision matrices using
+message passing only — no shared memory, no threads, no BLAS. Process 0 reads the input,
+distributes the work, collects the result, and writes it back.
+
+The assignment has two goals, and the second is the interesting one:
+
+1. **Decomposition.** Split a dense linear algebra kernel across processes with MPI
+   collectives, handling a matrix dimension that does not divide evenly.
+2. **Memory behavior.** Measure how much of the achievable speedup comes from *how the
+   inner loop walks memory* rather than from how many cores are running it.
+
+The workload is the canonical BLAS-3 kernel, so the loop-order lesson transfers directly to
+any dense linear algebra or stencil code.
+
+## 2. Key Features / Contributions
+
+- **Master-worker decomposition with row-block partitioning** — process 0 owns I/O and
+  orchestration; workers only compute.
+- **Variable-count collectives throughout.** 1023 divides evenly by neither 2 nor 4, so the
+  code uses `MPI_Scatterv` for both A and C and `MPI_Gatherv` for D, with `displs` derived
+  from a running row offset. B is broadcast in full with `MPI_Bcast`.
+- **Two serial optimizations implemented and benchmarked independently** — i-k-j loop
+  interchange, and pre-transposing B — so their contribution is separable from the
+  parallel one.
+- **Correctness verified on every run** against the instructor's `verify_` checker
+  (`比对成功！`).
+- **Raw timing logs preserved** from three separate sessions on the shared course server,
+  including the ones that don't flatter the headline numbers.
+
+## 3. Methodology / Architecture
+
+### Data distribution
+
+| Matrix | Shape | Method | Why |
+| :--- | :--- | :--- | :--- |
+| **A** | M×N, row-split | `MPI_Scatterv` | 1023 is not divisible by 2 or 4 — uneven blocks are mandatory |
+| **C** | M×K, row-split | `MPI_Scatterv` | Same, and must align with A's row blocks |
+| **B** | N×K, full | `MPI_Bcast` | Every output row of D needs the *entire* B; it cannot be split |
+| **D** | M×K, gathered | `MPI_Gatherv` | Symmetric with Scatterv — reassembles unequal blocks |
+
+```
+                    ┌─────────────┐
+   process 0 ──────▶│  read input │  RandMatrix.txt  (A, B, C)
+   (master)         └──────┬──────┘
+                           │  Scatterv A (rows)   sendcounts = {256,256,256,255} × 1023
+                           │  Scatterv C (rows)
+                           │  Bcast    B (full, 1023×1023 ≈ 8.4 MB)
+                           ▼
+        ┌──────────┬──────────┬──────────┬──────────┐
+        │  P0      │  P1      │  P2      │  P3      │   local D_block += A_block × B
+        └────┬─────┴────┬─────┴────┬─────┴────┬─────┘
+             └──────────┴────┬─────┴──────────┘
+                             │  Gatherv D
+                             ▼
+                    ┌─────────────┐
+                    │ write output│  result.txt
+                    └─────────────┘
 ```
 
----
+**Why row blocks and not column blocks.** Matrices are stored row-major, so a row block is
+one contiguous span that can be handed to a collective directly. A column block would have to
+be packed across a stride first, which costs more than the communication it saves.
 
-## 并行策略：主-从模式 + 按行划分
+### Serial optimization 1 — i-k-j loop interchange
 
-**进程 0（Master）** 负责读入 `RandMatrix.txt` 中的 A、B、C 三个矩阵，计时，分发数据，
-收集结果，最后把 D 写回 `result.txt`。其余进程只做计算。
-
-**为什么按行划分而不是按列？** 矩阵以行优先（row-major）方式存储在连续内存中。
-按行切分时，每个进程拿到的是**一整段连续内存**，可以直接 `memcpy` 级别的搬运；
-按列切分则需要跨步（strided）打包，通信前还要先在内存里重组，代价更高。
-
-### 数据分发
-
-| 矩阵 | 方法 | 原因 |
-| :--- | :--- | :--- |
-| **A**（M×N，按行切） | `MPI_Scatterv` | 1023 无法被 2 或 4 整除，必须用变长版本做**不均匀**分发 |
-| **C**（M×K，按行切） | `MPI_Scatterv` | 同 A，且要与 A 的行块对齐 |
-| **B**（N×K，全量） | `MPI_Bcast` | 计算 D 的**任意一行**都需要完整的 B，无法切分 |
-| **D**（M×K，收集） | `MPI_Gatherv` | 与 Scatterv 对称，把大小不一的各个行块拼回完整矩阵 |
-
-1023 行按 4 进程分配：`sendcounts = {256, 256, 256, 255}`。
-`MPI_Scatterv` 的 `displs`（偏移量）数组按累计行数计算，保证最后一块接得上。
-
-每行块 256 行 × 1023 列 → `sendcounts_A[i] = 256 * 1023`。
-B 矩阵 1023×1023 × 8 字节 ≈ 8.4 MB，每次广播都要完整发一遍，这是主要的通信开销。
-
----
-
-## 计算优化：循环变换
-
-最朴素的三重循环是 **i-j-k**：
+The naive triple loop is i-j-k:
 
 ```cpp
 for (int i = 0; i < M; ++i)
     for (int j = 0; j < K; ++j)
         for (int k = 0; k < N; ++k)
-            D[i][j] += A[i][k] * B[k][j];   // ← B[k][j] 跨行访问，步长 K
+            D[i][j] += A[i][k] * B[k][j];   // B[k][j] strides by K
 ```
 
-内层循环 `k` 递增时，`B[k][j]` 每次跳 `K` 个元素（一个完整行）。
-一个 64 字节的 cache line 只用到其中 8 字节，**缓存命中率约为 1/8**。
+The innermost index is `k`, so `B[k][j]` jumps a full row (K elements) each iteration. Of a
+64-byte cache line only 8 bytes are used before it is evicted — roughly **1/8 effective
+cache utilization**.
 
-### 优化一：i-k-j 循环交换
+Interchanging to i-k-j:
 
 ```cpp
 for (int i = 0; i < M; ++i)
     for (int k = 0; k < N; ++k)
         for (int j = 0; j < K; ++j)
-            D[i][j] += A[i][k] * B[k][j];   // ← 内层连续访问，全部命中
+            D[i][j] += A[i][k] * B[k][j];   // both stride by 1
 ```
 
-交换后，内层 `j` 递增时 `B[k][j]` 和 `D[i][j]` 都是**连续递增**的。
-`A[i][k]` 对内层是不变量，编译器可以提到寄存器里，每个 cache line 用满 64 字节。
+Now `B[k][j]` and `D[i][j]` both advance contiguously, and `A[i][k]` is loop-invariant with
+respect to the inner loop, so the compiler can keep it in a register. Every cache line is
+used in full. This is not a pure reordering of `for` statements — `A[i][k]` becoming
+invariant changes the arithmetic, and the accumulator has to be handled accordingly.
 
-注意这不是简单地交换 `for` 的顺序——`A[i][k]` 在内层成为循环不变量，
-外层还需引入临时标量累加，计算逻辑要跟着改。
-
-### 优化二：B 转置
+### Serial optimization 2 — pre-transposing B
 
 ```cpp
-// 预先把 B 转置成 Bt（K×N），之后 Bt[j][k] 就是行连续
+// transpose once: Bt is K×N, so Bt[j][k] is row-contiguous
 for (int i = 0; i < M; ++i)
     for (int j = 0; j < K; ++j) {
         double s = 0;
         for (int k = 0; k < N; ++k)
-            s += A[i][k] * Bt[j][k];        // ← 两个数组都按行连续读
+            s += A[i][k] * Bt[j][k];        // both operands contiguous
         D[i][j] = s + C[i][j];
     }
 ```
 
-转置的代价是 O(N·K) 次额外搬运，但换来主循环全程连续访存。
-对 1023³ ≈ 10.7 亿次乘加的主循环来说，这点开销可以忽略。
+The transpose costs O(N·K) extra traffic, but against a main loop of 1023³ ≈ 1.07 billion
+multiply-adds that is negligible.
 
-> 页面的交互演示中可以看到两种顺序下每个 cache line 的复用情况：
-> [mpi-loop-interchange.html](https://jie-gittttt.github.io/parallel-computing/01-mpi-matrix-multiplication/docs/mpi-loop-interchange.html) ·
-> [mpi-transpose.html](https://jie-gittttt.github.io/parallel-computing/01-mpi-matrix-multiplication/docs/mpi-transpose.html)
+## 4. Experiments and Results
 
----
+Course shared server, 1023×1023, `MPI_Wtime` around the compute phase:
 
-## 结果
-
-课程远程服务器，1023×1023：
-
-| 进程数 | 优化前 | 优化后 | 优化后加速比 |
+| Processes | Naive i-j-k | After loop interchange | Speedup (optimized) |
 | :-: | --: | --: | --: |
 | 1 | 10.494 s | 7.710 s | 1.00× |
 | 2 | 6.659 s | 3.946 s | 1.95× |
 | 4 | 3.398 s | **1.225 s** | **6.29×** |
 
-- **循环变换本身**：单进程从 10.494 s 降到 7.710 s，串行提速 **1.36×**——纯粹是访存效率的改善。
-- **并行化**：优化前 4 进程加速比 3.09×，优化后 **6.29×**。
-- **端到端**：`10.494 s → 1.225 s`，合计 **8.57×**。
+- **Serial optimization alone: 1.36×** (10.494 s → 7.710 s) with no extra hardware. This is
+  purely improved memory access.
+- **Parallel speedup at 4 processes: 3.09× → 6.29×** after the transformation.
+- **End to end: 10.494 s → 1.225 s, an 8.57× overall improvement.**
 
-每次都跑助教提供的校验程序，全部输出 `比对成功！`：
+Every run was checked with the instructor's verification program:
 
 ```
 $ ./verify_ RandMatrix.txt result.txt
 比对成功！
 ```
 
-### 加速比为什么超过 4？
+### Why is the 4-process speedup superlinear?
 
-6.29× 相对 4 个进程是**超线性**的。合理的原因是缓存：串行时整个 1023×1023 的
-double 矩阵（约 8.4 MB）放不进 L2，而 4 进程各自只处理 256 行，**工作集被切小**，
-更容易留在各级缓存里。加上循环交换带来的局部性改善，两者叠加超过了线性。
+6.29× on 4 processes exceeds linear scaling. The most plausible explanation is cache: in the
+serial case the full 1023×1023 array of doubles (≈8.4 MB) does not fit in L2, whereas each of
+the 4 processes handles only 256 rows, so the working set per core shrinks enough to stay
+resident. Combined with the locality gain from the loop interchange, the two effects
+compound past linearity.
 
-### 关于计时波动的说明
+This is an inference from the timing data, not something measured with hardware counters — see
+the Limitations section.
 
-同一份代码在不同会话中的绝对耗时并不一致。`results/run-log.txt` 里完整保留了三次
-不同时段的输出：
+### Timing variance
 
-| | 1 进程 | 2 进程 | 4 进程 |
+Absolute numbers differ between sessions on the same code. Three logged sessions:
+
+| | 1 process | 2 processes | 4 processes |
 | :--- | --: | --: | --: |
-| 会话 A | 7.640 s | 3.836 s | 2.762 s |
-| 会话 B | 5.400 s | 4.135 s | 3.033 s |
-| 会话 C（上表所用） | 10.494 s | 6.659 s | 3.398 s（优化前） |
+| Session A | 7.640 s | 3.836 s | 2.762 s |
+| Session B | 5.400 s | 4.135 s | 3.033 s |
+| Session C (table above) | 10.494 s | 6.659 s | 3.398 s (naive) |
 
-差异来源是共享服务器的负载：这台机器上还跑着别人的作业，CPU 频率与缓存争用都会变。
-表中取的是**最后一次带完整校验记录**的运行，各会话的原始输出都在
-[results/run-log.txt](results/run-log.txt) 中可查。
+The server is shared with other students' jobs, so clock frequency and cache contention vary.
+The headline table uses the last session with a complete verification record; the raw output
+of all sessions is in [`results/run-log.txt`](results/run-log.txt) and
+[`results/timing-sessions.txt`](results/timing-sessions.txt).
 
----
+## 5. Tech Stack
 
-## 文件结构
+- **Language**: C++11
+- **Parallelism**: MPI (`mpic++`, MPICH/OpenMPI on the course server)
+- **Timing**: `MPI_Wtime`
+- **Build**: single translation unit, no build system required
+
+## 6. Installation and Usage
+
+**Requirements** — an MPI implementation (`mpic++` on `PATH`) and a 1023×1023
+`RandMatrix.txt` containing A, B and C, in the format described in
+[`report/io-spec.pdf`](report/io-spec.pdf).
+
+```bash
+mpic++ -o Matrix src/Matrix.cpp -std=c++11
+mpirun -np 4 ./Matrix        # reads RandMatrix.txt, writes result.txt
+```
+
+The process count is a runtime argument; `sendcounts` and `displs` are recomputed for
+any number of processes, so `-np 2`, `-np 8`, etc. all work.
+
+**Expected output** — timing lines per process, followed by a total:
+
+```
+------------------------------------------
+Job Complete.
+Total execution time with 4 processes: 1.225 seconds
+------------------------------------------
+```
+
+## 7. Limitations
+
+- **The superlinear result is unexplained at the hardware level.** The cache working-set
+  argument is consistent with the data but was not verified with performance counters.
+  A rigorous version would measure L2/L3 miss rates at each process count.
+- **Scaling stops at 4 processes.** No strong or weak scaling study was performed, so the
+  point at which communication overtakes computation is unknown.
+- **Shared-server noise.** Runs are not isolated, so the absolute timings — and possibly the
+  shape of the speedup curve — carry load-dependent error. This is why the raw logs are kept.
+- **One matrix size only.** All conclusions are drawn at N = 1023. Nothing here demonstrates
+  how the tradeoff shifts as the matrix outgrows cache entirely.
+- **B is broadcast in full, every run.** At 8.4 MB this is the dominant communication cost and
+  it does not shrink with process count. A production implementation would use a
+  decomposition that partitions B as well (SUMMA, Cannon) or overlap communication with
+  computation via `MPI_Isend`/`MPI_Irecv`.
+- **Blocking collectives only.** No computation/communication overlap was attempted.
+
+## Repository Structure
 
 ```
 01-mpi-matrix-multiplication/
-├── src/Matrix.cpp                  # 主程序（循环变换优化后的版本）
+├── src/Matrix.cpp                  # main program (loop-interchange version)
 ├── report/
-│   ├── report.pdf                  # 实验报告
-│   └── io-spec.pdf                 # 输入输出格式说明（教师提供）
-├── slides/optimization.pdf         # 优化方案汇报 PPT
+│   ├── report.pdf                  # lab report (Chinese)
+│   └── io-spec.pdf                 # I/O format specification (instructor-provided)
+├── slides/optimization.pdf         # optimization presentation (Chinese)
 ├── results/
-│   ├── run-log.txt                 # 三次运行的完整终端输出（含 verify_ 校验）
-│   └── timing-sessions.txt         # 各会话 1 / 2 / 4 进程计时汇总
+│   ├── run-log.txt                 # full terminal output, three runs
+│   └── timing-sessions.txt         # per-session timing summary
 └── docs/
-    ├── mpi-loop-interchange.html   # i-k-j 循环交换的访存顺序对比
-    └── mpi-transpose.html          # 原版与 B 转置版的计算流程对比
+    ├── mpi-loop-interchange.html   # interactive: cache line reuse under each loop order
+    └── mpi-transpose.html          # interactive: original vs. transposed B
 ```
+
+Reports and slides are written in Chinese.

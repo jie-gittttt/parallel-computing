@@ -1,65 +1,81 @@
-# 作业 02 · 基于共享内存的 BMP 图像并行卷积
+# Parallel Image Convolution — Pthread vs. OpenMP
 
-对 BMP 图像做 5×5 高斯卷积（σ = 1.5，半径 2），分别用 **Pthread** 和 **OpenMP** 两种
-共享内存并行方式实现，并对比不同并行范式的差异。
+[English](README.md) | [中文](README.zh-CN.md)
 
-```bash
-g++ -O2 -o pthread_conv src/pthread/pthread.cpp -lpthread
-g++ -O2 -fopenmp -o omp_conv src/openmp/omp.cpp
+A 5×5 Gaussian convolution of BMP images implemented twice — once with raw Pthreads and once
+with OpenMP — where cutting the per-pixel work in half by exploiting kernel separability
+reverses which scheduler is the better choice.
 
-./pthread_conv 4        # 参数为线程数
-./omp_conv              # 线程数由 OMP_NUM_THREADS 控制
-```
+## 1. Overview
 
-程序读入 BMP，卷积后写回同尺寸的 BMP。边界采用**零填充**（Zero Padding）——
-越界像素视为 0，这样输出图与输入图尺寸一致，不会产生边界收缩。
+The task is to convolve a BMP image with a fixed 5×5 Gaussian kernel (σ = 1.5) using both
+shared-memory paradigms, then compare them. The program reads a BMP, convolves it, and writes
+a BMP of identical dimensions.
 
----
+Two goals:
 
-## 核心优化：可分离卷积
+1. **Compare the paradigms.** Pthreads gives explicit control over thread creation, work
+   partitioning and synchronization; OpenMP expresses the same decomposition as compiler
+   directives. The assignment is to see what each costs you in code and in performance.
+2. **Optimize the algorithm, not just the parallelism.** A 5×5 Gaussian is *separable*, and
+   exploiting that halves the arithmetic — independently of how many cores are used.
 
-5×5 高斯核是**可分离**的——一个二维高斯可以写成两个一维高斯的乘积：
+Borders are handled with **zero padding** rather than cropping, so the output matches the
+input dimensions exactly.
 
-```
-G2D(x, y)  =  G1D(x) · G1D(y)
-```
+## 2. Key Features / Contributions
 
-于是二维卷积可以拆成两趟一维卷积：
+- **Four complete implementations** — Pthread and OpenMP, each in a direct 2D version and a
+  separable version — so the effect of the algorithmic change and the effect of the
+  parallelism stay separable.
+- **Hand-written barrier** in the Pthread separable version. The vertical pass reads rows
+  produced by the horizontal pass, so all threads must finish stage one before any starts
+  stage two. OpenMP gets this for free from the implicit barrier at the end of `parallel for`;
+  Pthreads needs `pthread_barrier_t`.
+- **A float intermediate buffer** in the separable versions. The direct versions truncate to
+  8-bit after every pass — twice per pixel — while the separable versions keep the
+  intermediate in `float` and truncate once. This costs one extra image-sized buffer and
+  yields a measurably lower MSE.
+- **A documented performance reversal** between the two paradigms depending on iteration
+  granularity (see Results).
+- **Timing data and a paradigm comparison table** preserved as CSV under `data/`.
 
-| | 每像素乘加次数 | 中间结果 |
+## 3. Methodology / Architecture
+
+### Separable convolution
+
+A 2D Gaussian is the outer product of two 1D Gaussians: `G2D(x, y) = G1D(x) · G1D(y)`. So a
+5×5 convolution can be run as two 1D passes:
+
+| | Multiply-adds per pixel | Intermediate |
 | :--- | --: | :--- |
-| 直接二维卷积 | 5 × 5 = **25** | — |
-| 可分离：水平 1×5 + 垂直 5×1 | 5 + 5 = **10** | 需一张 float 中间图 |
+| Direct 2D | 5 × 5 = **25** | — |
+| Separable: horizontal 1×5 + vertical 5×1 | 5 + 5 = **10** | one float image |
 
-**计算量降到 40%**，理论上单线程就能提速 2.5×。
+```
+ input (8-bit)                    stage 1                    stage 2                output
+   ┌────────┐   1×5 horizontal   ┌────────┐   5×1 vertical  ┌────────┐  truncate  ┌───────┐
+   │  H×W   │ ─────────────────▶ │ float  │ ──────────────▶ │ float  │ ─────────▶ │ 8-bit │
+   └────────┘   (row-independent)│  H×W   │  (reads ±2 rows)└────────┘            └───────┘
+                                 └────────┘
+                                  ▲ all threads must reach here before stage 2 starts
+```
 
-两趟之间必须同步：垂直卷积要读取水平卷积的**上下相邻行**，必须等整个水平阶段完成。
-Pthread 版本用手写 barrier 实现，OpenMP 版本则利用 `parallel for` 结束处的**隐式屏障**。
+Arithmetic drops to 40% of the direct version, predicting a 2.5× single-threaded speedup.
+The two passes require a **barrier** between them.
 
-### 精度上的意外收益
-
-基础版把每趟结果都截断成 8-bit 整数，**两次截断**会累积误差。
-可分离版把中间结果保存在 `float` 缓冲里，只在最后一趟才截断——
-多花一张与图像等大的内存，换到更低的 MSE（图像质量更好）。
-
-> 逐阶段对照：[convolution-optimized.html](https://jie-gittttt.github.io/parallel-computing/02-pthread-openmp-convolution/docs/convolution-optimized.html)
-
----
-
-## 两种并行范式
-
-### Pthread：显式线程管理
+### Pthread: explicit thread management
 
 ```cpp
 pthread_create(&threads[i], NULL, worker, &args[i]);
 pthread_join(threads[i], NULL);
 ```
 
-`pthread_create` 只接受一个 `void*` 参数，所以需要自己定义结构体来打包
-图像指针、行范围、和高斯核。任务划分靠**手工计算 `start_row` 和 `end_row`**——
-按行静态均分，每个线程负责一段连续的行。
+`pthread_create` accepts a single `void*`, so a struct packs the image pointers, the row range
+and the kernel. Work is split **statically** — each thread gets one contiguous band of rows,
+computed by hand from `start_row` / `end_row`.
 
-### OpenMP：编译指令
+### OpenMP: compiler directives
 
 ```cpp
 #pragma omp parallel for collapse(2) schedule(dynamic)
@@ -67,73 +83,126 @@ for (int y = 0; y < height; ++y)
     for (int x = 0; x < width; ++x) { ... }
 ```
 
-| 指令 | 作用 |
+| Directive | Effect |
 | :--- | :--- |
-| `parallel for` | 把紧跟着的 for 循环自动分配给多个线程，Fork-Join 模型 |
-| `collapse(2)` | 把 `y` 和 `x` 两层循环**合并成一个扁平迭代空间**再划分。不 collapse 的话只能按行切，线程数超过图像行数就没法再分了；collapse 后并行粒度从「行」细化到「像素」 |
-| `schedule(dynamic)` | 动态调度：线程做完手头一块就去领下一块（抢单模式）。解决「最慢的线程拖累整体」——图像边缘与中心的像素计算量相同，但缓存行为不同，静态划分容易出现长尾 |
+| `parallel for` | Distributes the following loop across threads (fork-join) |
+| `collapse(2)` | Flattens the `y` and `x` loops into one iteration space before splitting. Without it the split can only happen at row granularity, so the parallel unit is a row; with it, the unit is a single pixel |
+| `schedule(dynamic)` | Threads claim the next chunk when they finish (work stealing), which addresses the long tail caused by differing cache behavior between image regions |
 
-OpenMP 会自动推断 `y`、`x` 为 `private`、图像指针为 `shared`，不需要手写。
-Pthread 版本要做同样的动态负载均衡，得自己维护一个任务队列加互斥锁。
+OpenMP infers `y` and `x` as `private` and the image pointers as `shared`. Matching the
+dynamic scheduling behavior in Pthreads would require a hand-built task queue and mutex.
 
----
+## 4. Experiments and Results
 
-## 结果
+Same test image, seconds, mean of 3 measurements:
 
-同一张测试图，计时单位秒（3 次测量取平均）：
-
-| 实现 | 1 线程 | 2 线程加速比 | 4 线程 | 4 线程加速比 |
+| Implementation | 1 thread | 2-thread speedup | 4 threads | 4-thread speedup |
 | :--- | --: | --: | --: | --: |
-| Pthread 基础版 | 1.043 | 1.93× | 0.323 | 3.23× |
-| Pthread 可分离版 | 0.400 | 1.96× | 0.128 | 3.12× |
-| OpenMP 基础版 | 1.053 | 1.53× | 0.370 | 2.84× |
-| OpenMP 可分离版 | 0.392 | 1.97× | 0.111 | **3.52×** |
+| Pthread, direct 2D | 1.043 | 1.93× | 0.323 | 3.23× |
+| Pthread, separable | 0.400 | 1.96× | 0.128 | 3.12× |
+| OpenMP, direct 2D | 1.053 | 1.53× | 0.370 | 2.84× |
+| OpenMP, separable | 0.392 | 1.97× | 0.111 | **3.52×** |
 
-**可分离卷积的效果**：Pthread 从 1.043 s 降到 0.400 s（2.61×），
-OpenMP 从 1.053 s 降到 0.392 s（2.69×）——与理论值 2.5× 吻合，甚至略好，
-多出来的一点来自 float 中间缓冲减少的整数截断开销。
+**Effect of separability alone:** Pthread 1.043 s → 0.400 s (**2.61×**), OpenMP 1.053 s →
+0.392 s (**2.69×**). This matches the predicted 2.5× and slightly exceeds it; the extra margin
+comes from the float intermediate buffer removing one round of 8-bit truncation per pixel.
 
-### 一个有意思的反转
+### The reversal
 
-在**基础版**上，Pthread 的静态划分反而赢（4 线程 3.23× vs 2.84×）；
-到了**可分离版**，OpenMP 的动态调度反超（3.52× vs 3.12×）。
+On the **direct** version, Pthread's static partitioning wins at 4 threads (3.23× vs. 2.84×).
+On the **separable** version, OpenMP's dynamic scheduling wins (3.52× vs. 3.12×).
 
-原因在于每像素的工作量变了。基础版每像素 25 次乘加，每次迭代的活儿足够重，
-`schedule(dynamic)` 每次「领任务」的原子操作开销纯属浪费，静态划分更划算。
-可分离版把每次迭代降到 10 次乘加，**调度开销在总时间里的占比翻了倍**，
-而动态调度换来的负载均衡收益开始盖过它——尤其是第二趟垂直卷积存在明显的 cache 长尾。
+The explanation is iteration granularity. The direct version does 25 multiply-adds per pixel,
+so each iteration is substantial work and the atomic operation behind `schedule(dynamic)` to
+claim the next chunk is pure overhead. The separable version drops to 10 multiply-adds per
+pixel, **which doubles scheduling overhead as a fraction of total time**, and at that point
+the load-balancing benefit — especially the cache long tail in the vertical pass — outweighs it.
 
-换句话说：**调度策略没有绝对优劣，取决于单次迭代的粒度**。
-这也是作业里同时保留两套实现、分别在两种粒度下测量的价值所在。
+The takeaway: **no scheduling policy is universally better; it depends on the size of one
+iteration.** Keeping both implementations and measuring each at both granularities is what
+makes this visible.
 
-> 完整的 Pthread vs OpenMP 逐维度对比（编程范式、代码量、任务划分、同步机制、
-> 可移植性）见 [data/comparison.csv](data/comparison.csv)。
+> Full dimension-by-dimension comparison (paradigm, code volume, work partitioning,
+> synchronization, portability): [`data/comparison.csv`](data/comparison.csv).
 
----
+## 5. Tech Stack
 
-## 文件结构
+- **Language**: C++ with POSIX threads and OpenMP
+- **Compiler**: `g++ -O2`, `-lpthread` and `-fopenmp`
+- **Image I/O**: hand-written BMP reader/writer (no external image library)
+- **Measurement**: `std::chrono`, 3 runs averaged
+
+## 6. Installation and Usage
+
+**Requirements** — `g++` with OpenMP support. The program reads a BMP from the working
+directory; no external libraries are needed.
+
+```bash
+g++ -O2 -o pthread_conv src/pthread/pthread.cpp -lpthread
+g++ -O2 -fopenmp -o omp_conv src/openmp/omp.cpp
+
+./pthread_conv 4          # thread count as argument
+./omp_conv                # thread count via OMP_NUM_THREADS
+```
+
+The separable versions build the same way:
+
+```bash
+g++ -O2 -o pthread_conv_sep src/pthread/pthread_sep.cpp -lpthread
+g++ -O2 -fopenmp -o omp_conv_sep src/openmp/omp_sep.cpp
+```
+
+```
+OMP_NUM_THREADS=4 ./omp_conv_sep
+```
+
+The 5×5 Gaussian kernel is fixed in [`src/gaussian_kernel.txt`](src/gaussian_kernel.txt)
+(σ = 1.5, radius 2), as specified by the assignment.
+
+**Verification** — see [`figures/pthread-verify.png`](figures/pthread-verify.png) for the
+correctness check against the reference output.
+
+## 7. Limitations
+
+- **Tested at up to 4 threads only.** No scaling study beyond 4 cores, so where the
+  synchronization and scheduling overheads start to dominate is unknown.
+- **A single test image.** Cache behavior depends heavily on image size relative to L2/L3;
+  the Pthread/OpenMP reversal in particular may not hold for a much larger or much smaller image.
+- **Static vs. dynamic scheduling is compared across paradigms, not within one.** Pthread is
+  always static and OpenMP always dynamic here, so the comparison confounds the paradigm with
+  the scheduling policy. Isolating the two would require a dynamic Pthread version.
+- **The barrier cost is not separately measured.** The hand-written Pthread barrier is
+  presumed more expensive than OpenMP's implicit one, but no experiment isolates it.
+- **Zero padding is fixed.** No comparison against mirror or replicate padding, which would
+  change both edge quality and the memory access pattern.
+- **Only one kernel.** Separability is a property of the Gaussian specifically; the
+  O(K²) → O(2K) argument does not generalize to arbitrary 5×5 kernels.
+
+## Repository Structure
 
 ```
 02-pthread-openmp-convolution/
 ├── src/
 │   ├── pthread/
-│   │   ├── pthread.cpp             # 基础版：二维 5×5 卷积
-│   │   └── pthread_sep.cpp         # 可分离版：水平 + 垂直两趟，手写 barrier
+│   │   ├── pthread.cpp             # direct 2D, static row partitioning
+│   │   └── pthread_sep.cpp         # separable, hand-written barrier
 │   ├── openmp/
-│   │   ├── omp.cpp                 # 基础版：collapse(2) + schedule(dynamic)
-│   │   └── omp_sep.cpp             # 可分离版：靠 parallel for 的隐式屏障同步
-│   └── gaussian_kernel.txt         # 作业指定的 5×5 高斯核（σ = 1.5）
+│   │   ├── omp.cpp                 # direct 2D, collapse(2) + schedule(dynamic)
+│   │   └── omp_sep.cpp             # separable, implicit barrier
+│   └── gaussian_kernel.txt         # 5×5 Gaussian kernel (σ = 1.5), instructor-provided
 ├── report/
-│   ├── pthread.pdf                 # Pthread 实验报告
-│   └── openmp.pdf                  # OpenMP 实验报告
-├── slides/presentation.pdf         # 汇报 PPT
+│   ├── pthread.pdf                 # lab report (Chinese)
+│   └── openmp.pdf                  # lab report (Chinese)
+├── slides/presentation.pdf         # presentation (Chinese)
 ├── data/
-│   ├── pthread-results.csv         # Pthread 计时原始数据（1/2/4 线程）
-│   ├── openmp-results.csv          # OpenMP 计时原始数据
-│   └── comparison.csv              # 两种范式的逐维度对比表
-├── figures/                        # 各核数输出图与正确性验证图（9 张 PNG）
+│   ├── pthread-results.csv         # raw timing, 1/2/4 threads
+│   ├── openmp-results.csv          # raw timing
+│   └── comparison.csv              # paradigm comparison across dimensions
+├── figures/                        # output images per core count, plus correctness check
 └── docs/
-    ├── convolution.html            # 卷积窗口如何在图像上滑动
-    ├── convolution-optimized.html  # 二维 → 两趟一维的逐阶段对照
-    └── convolution-parallel.html   # 按行划分与负载均衡问题
+    ├── convolution.html            # interactive: the sliding convolution window
+    ├── convolution-optimized.html  # interactive: 2D → two 1D passes, stage by stage
+    └── convolution-parallel.html   # interactive: row partitioning and load balancing
 ```
+
+Reports and slides are written in Chinese.
